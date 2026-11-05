@@ -208,6 +208,34 @@ describe("hook session-end", () => {
   });
 });
 
+describe("hook stop", () => {
+  const stopInput = JSON.stringify({ session_id: SID, hook_event_name: "Stop", stop_hook_active: false });
+
+  test("prints the helper's block decision as JSON", async () => {
+    const h = harness({ stdin: stopInput });
+    const stub = h.stub(() => ({ ok: true, decision: "block", reason: "Discord message(s) for this session:\n1. hi" }));
+    expect(await runCli(["hook", "stop"], h.deps)).toBe(0);
+    expect(stub.requests).toEqual([{ op: "stop-hook", sessionId: SID }]);
+    expect(JSON.parse(h.text())).toEqual({ decision: "block", reason: "Discord message(s) for this session:\n1. hi" });
+  });
+
+  test("prints nothing when nothing waits, when Discord is off, or when the helper is down", async () => {
+    const quiet = harness({ stdin: stopInput });
+    quiet.stub(() => ({ ok: true }));
+    expect(await runCli(["hook", "stop"], quiet.deps)).toBe(0);
+    expect(quiet.text()).toBe("");
+
+    const off = harness({ enabled: false, stdin: stopInput });
+    const stub = off.stub();
+    expect(await runCli(["hook", "stop"], off.deps)).toBe(0);
+    expect(stub.requests).toHaveLength(0);
+
+    const down = harness({ stdin: stopInput });
+    expect(await runCli(["hook", "stop"], down.deps)).not.toBe(0);
+    expect(down.text()).toBe("");
+  });
+});
+
 describe("timing", () => {
   test("the helper answers register well inside the hook's 2-second wait", async () => {
     const { DEFAULT_TIMING } = await import("../src/channels.ts");
@@ -218,6 +246,15 @@ describe("timing", () => {
 });
 
 describe("hook dispatch", () => {
+  test("every event hooks/discord.sh runs has a handler", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { HOOKS } = await import("../src/main.ts");
+    const wrapper = readFileSync(new URL("../../hooks/discord.sh", import.meta.url), "utf8");
+    const events = /session-start \| session-end \| notification \| pre-ask \| post-ask \| stop\)/.exec(wrapper);
+    expect(events).not.toBeNull();
+    expect(Object.keys(HOOKS).sort()).toEqual(["notification", "post-ask", "pre-ask", "session-end", "session-start", "stop"]);
+  });
+
   test("an event this version does not know exits 0 with nothing printed", async () => {
     const h = harness();
     expect(await runCli(["hook", "some-future-event"], h.deps)).toBe(0);

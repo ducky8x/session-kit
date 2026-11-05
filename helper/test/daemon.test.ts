@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { DAY_MS } from "../src/channels.ts";
 import { HelperError } from "../src/client.ts";
 import { Daemon, type DiscordMessage } from "../src/daemon.ts";
@@ -330,7 +331,7 @@ describe("reload", () => {
 
   test("an unknown op is refused with its name", async () => {
     const k = await daemonKit();
-    const error = await k.call({ op: "listen", sessionId: SID }).catch((e) => e);
+    const error = await k.call({ op: "frobnicate", sessionId: SID }).catch((e) => e);
     expect(error).toBeInstanceOf(HelperError);
     expect(error).toMatchObject({ code: "unknown-op" });
   });
@@ -359,8 +360,10 @@ describe("sk-discord status", () => {
     expect(JSON.parse(r.out)).toMatchObject({ status: "connected", sessions: 0, outbox: 0, version: expect.any(String) });
   });
 
-  test("with the helper down it says how to start it and exits 2", async () => {
+  test("with the helper installed and set up but down, it says how to start it and exits 2", async () => {
     const k = await daemonKit({ noStart: true });
+    mkdirSync(dirname(k.paths.bin), { recursive: true });
+    writeFileSync(k.paths.bin, "#!/bin/sh\n");
     const r = await k.cli(["status"]);
     expect(r.code).toBe(2);
     expect(r.err).toContain("launchctl kickstart -k gui/$UID/io.github.ducky8x.session-kit.discord");

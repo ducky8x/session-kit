@@ -13,6 +13,12 @@ export interface Paths {
   socket: string;
   /** Where the installed binary lives. */
   bin: string;
+  /** Held while `update` replaces the binary, so two updates never run at once. */
+  updateLock: string;
+  /** Written when an update fails (what and why), removed when one works. */
+  updateState: string;
+  /** The LaunchAgent that starts the helper at login. */
+  launchAgent: string;
 }
 
 export function pathsFor(home: string): Paths {
@@ -27,5 +33,8 @@ export function pathsFor(home: string): Paths {
     log: join(dir, "helper.log"),
     socket: join(dir, "helper.sock"),
     bin: join(kit, "bin", "sk-discord"),
+    updateLock: join(kit, "bin", ".sk-discord-update.lock"),
+    updateState: join(dir, "update.json"),
+    launchAgent: join(home, "Library", "LaunchAgents", "io.github.ducky8x.session-kit.discord.plist"),
   };
 }

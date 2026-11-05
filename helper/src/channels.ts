@@ -157,6 +157,8 @@ export interface ChannelDeps {
   /** The gateway is connected, so Discord is reachable. */
   isOnline(): boolean;
   timing?: Timing;
+  /** A session lost its channel: deleted by hand or by Discord (`deleted`), or removed with its entry (`removed`). */
+  onUnlinked?(sessionId: string, why: "deleted" | "removed"): void;
 }
 
 function asChannel(raw: unknown): GuildChannel | null {
@@ -306,6 +308,7 @@ export class ChannelManager {
     }
     const unlinked = this.d.sessions.unlinkMissing(new Set(this.cache.keys()));
     if (unlinked.length > 0) this.d.log.info(`unlinked ${unlinked.length} sessions whose channels are gone`);
+    for (const sessionId of unlinked) this.d.onUnlinked?.(sessionId, "deleted");
     const gone = Object.entries(this.config().categories)
       .filter(([, id]) => this.cache.get(id)?.type !== 4)
       .map(([key]) => key);
@@ -353,6 +356,7 @@ export class ChannelManager {
         this.cancelRename(entry.sessionId);
         this.d.sessions.unlink(entry.sessionId);
         this.d.log.info(`channel ${channel.id} was deleted; session ${entry.sessionId.slice(0, 8)} is unlinked`);
+        this.d.onUnlinked?.(entry.sessionId, "deleted");
       }
       const key = Object.entries(this.config().categories).find(([, id]) => id === channel.id)?.[0];
       if (key !== undefined) {
@@ -552,6 +556,7 @@ export class ChannelManager {
     }
     this.cancelRename(entry.sessionId);
     this.d.sessions.remove(entry.sessionId);
+    this.d.onUnlinked?.(entry.sessionId, "removed");
   }
 
   private async move(entry: SessionEntry, toArchive: boolean): Promise<void> {
@@ -563,6 +568,7 @@ export class ChannelManager {
       if (error instanceof RestError && error.code === UNKNOWN_CHANNEL) {
         this.cache.delete(entry.channelId);
         this.d.sessions.unlink(entry.sessionId);
+        this.d.onUnlinked?.(entry.sessionId, "deleted");
         return;
       }
       throw error;
@@ -648,6 +654,7 @@ export class ChannelManager {
         if (error instanceof RestError && error.code === UNKNOWN_CHANNEL) {
           this.cache.delete(channelId);
           this.d.sessions.unlink(sessionId);
+          this.d.onUnlinked?.(sessionId, "deleted");
           return;
         }
         this.d.log.warn(`renaming channel ${channelId} failed: ${(error as Error).message}`);

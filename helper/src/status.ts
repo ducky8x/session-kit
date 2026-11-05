@@ -9,7 +9,9 @@ export type StatusCode =
   | "token-rejected"
   | "intent-missing"
   | "no-server"
-  | "not-in-server";
+  | "not-in-server"
+  | "update-failed"
+  | "not-installed";
 
 export interface StatusProblem {
   /** What is wrong, in a few words. */
@@ -28,6 +30,8 @@ export const STATUS_PROBLEMS: Partial<Record<StatusCode, StatusProblem>> = {
   },
   "no-server": { problem: "no Discord server is set up", fix: "sk-discord setup server" },
   "not-in-server": { problem: "the bot isn't in the server", fix: "sk-discord setup invite" },
+  "update-failed": { problem: "the last update didn't install", fix: "/discord update" },
+  "not-installed": { problem: "the helper isn't installed", fix: "/discord on" },
 };
 
 /** Codes that mean setup has to run (or be finished) before Discord can work. */
