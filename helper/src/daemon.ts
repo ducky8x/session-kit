@@ -12,6 +12,7 @@ import type { Keychain } from "./secrets.ts";
 import { ControlServer, HandlerRegistry, type Request, RequestError } from "./server.ts";
 import { type SessionEntry, SessionStore } from "./state.ts";
 import { SETUP_NEEDED, STATUS_PROBLEMS, type StatusCode } from "./status.ts";
+import { readUpdateFailure } from "./update.ts";
 import { VERSION } from "./version.ts";
 
 export interface DaemonDeps {
@@ -326,6 +327,7 @@ export class Daemon {
     if (this.gateway.state === "intent-missing") return "intent-missing";
     if (this.config.guildId === null) return "no-server";
     if (this.notInServer) return "not-in-server";
+    if (readUpdateFailure(this.deps.paths) !== null) return "update-failed";
     return this.gateway.state === "connected" ? "connected" : "connecting";
   }
 

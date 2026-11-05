@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 import { homedir } from "node:os";
-import { type CallHelper, HelperError, NOT_RUNNING, callHelper } from "./client.ts";
+import { type CallHelper, callHelper } from "./client.ts";
 import { runDaemon } from "./run-daemon.ts";
 import { notificationHook } from "./hooks/notification.ts";
 import { postAskHook, preAskHook } from "./hooks/ask.ts";
@@ -8,9 +8,14 @@ import { stopHook } from "./hooks/stop.ts";
 import { listenCommand } from "./listen.ts";
 import { sessionEndHook } from "./hooks/session-end.ts";
 import { type HookDeps, sessionStartHook } from "./hooks/session-start.ts";
+import { realClock, type Clock } from "./clock.ts";
 import { pathsFor } from "./paths.ts";
+import { type ProcessRunner, realProcessRunner } from "./process.ts";
+import { type Keychain, SecurityKeychain } from "./secrets.ts";
 import { sendCommand } from "./send.ts";
-import { HELPER_DOWN } from "./status.ts";
+import { type SetupDeps, offCommand, onCommand, setupCommand, statusCommand } from "./setup.ts";
+import { readSecret } from "./tty.ts";
+import { updateCommand } from "./update.ts";
 import { VERSION } from "./version.ts";
 
 /** What every command gets from the outside world. Tests pass fakes; `main` passes the real things. */
@@ -31,6 +36,19 @@ export interface CliDeps {
   socketTimeoutMs?: number;
   /** `sk-discord daemon`. Defaults to the real daemon; tests never start it this way. */
   runDaemon?: () => Promise<number>;
+  /** The rest default to the real things, which tests must never reach (see `real`). */
+  runner?: ProcessRunner;
+  keychain?: Keychain;
+  clock?: Clock;
+  /** Reads the bot token for `setup token`. Without it, stdin is read. */
+  readSecret?: (prompt: string) => Promise<string>;
+  which?: (command: string) => string | null;
+  restBaseUrl?: string;
+  releaseBaseUrl?: string;
+  fetch?: typeof fetch;
+  /** `process.arch` and the user id, for `update` and `launchctl`. */
+  arch?: string;
+  uid?: number;
 }
 
 type Command = (args: string[], deps: CliDeps) => Promise<number>;
@@ -62,32 +80,28 @@ export const HOOKS: Record<string, Hook> = {
   "post-ask": postAskHook,
 };
 
-/** How long `status` waits for the helper. */
-const STATUS_TIMEOUT_MS = 2000;
+/** Only the real binary may reach the Keychain, launchctl or other programs; a test that gets here is a bug. */
+function real<T>(what: string, make: () => T): T {
+  if (process.env.NODE_ENV === "test") throw new Error(`a test reached the real ${what}; pass a fake in CliDeps`);
+  return make();
+}
 
-async function statusCommand(args: string[], deps: CliDeps): Promise<number> {
-  let reply: Record<string, any>;
-  try {
-    reply = await (deps.call ?? callHelper)(pathsFor(deps.home).socket, { op: "status" }, { timeoutMs: STATUS_TIMEOUT_MS });
-  } catch (error) {
-    if (error instanceof HelperError && error.code === NOT_RUNNING) {
-      deps.err(`${HELPER_DOWN}\n`);
-      return 2;
-    }
-    deps.err(`${(error as Error).message}\n`);
-    return 1;
-  }
-  if (args.includes("--json")) {
-    const { ok: _ok, ...fields } = reply;
-    deps.out(`${JSON.stringify(fields)}\n`);
-    return 0;
-  }
-  const lines = [`${reply.status}`];
-  if (reply.fix) lines.push(`Problem: ${reply.problem}`, `Fix: ${reply.fix}`);
-  lines.push(`Sessions: ${reply.sessions} (${reply.linked} with a channel, ${reply.archived} archived)`);
-  if (reply.outbox > 0) lines.push(`Posts waiting: ${reply.outbox}`);
-  deps.out(`${lines.join("\n")}\n`);
-  return 0;
+function setupDeps(deps: CliDeps): SetupDeps {
+  const runner = deps.runner ?? real("process runner", () => realProcessRunner);
+  return {
+    paths: pathsFor(deps.home),
+    keychain: deps.keychain ?? real("Keychain", () => new SecurityKeychain(runner)),
+    runner,
+    clock: deps.clock ?? realClock,
+    call: deps.call ?? callHelper,
+    out: deps.out,
+    err: deps.err,
+    readSecret: deps.readSecret ?? (async () => deps.readStdin()),
+    which: deps.which ?? ((command) => Bun.which(command)),
+    uid: deps.uid ?? process.getuid?.() ?? 0,
+    ...(deps.restBaseUrl ? { restBaseUrl: deps.restBaseUrl } : {}),
+    ...(deps.fetch ? { fetch: deps.fetch } : {}),
+  };
 }
 
 export const USAGE = `sk-discord: the Discord helper for session-kit
@@ -95,7 +109,14 @@ export const USAGE = `sk-discord: the Discord helper for session-kit
   sk-discord send --session <id> [--ping] [--done] "<text>"
                                         post in the session's channel ("-" reads stdin)
   sk-discord listen --session <id>      wait for one event for the session and print it as JSON
-  sk-discord status [--json]            show what the helper is doing
+  sk-discord status [--json]            show what the helper is doing, and the fix when something is wrong
+  sk-discord on | off                   turn Discord on or off (the setup is kept)
+  sk-discord setup token                save the bot token in the Keychain (run it in your own terminal)
+  sk-discord setup invite --app-id <id> print the link that adds the bot to your server
+  sk-discord setup server [--guild <id>]
+                                        pick the server and make its categories and #session-kit
+  sk-discord setup launch-agent         install the LaunchAgent that runs the helper
+  sk-discord update --version <v>       install that release of the helper and restart it
   sk-discord daemon                     run the helper (the LaunchAgent starts it)
   sk-discord hook <event>               run a session hook (JSON on stdin)
   sk-discord --version                  print the helper's version
@@ -112,7 +133,22 @@ export const COMMANDS: Record<string, Command> = {
       err: deps.err,
       call: deps.call ?? callHelper,
     }),
-  status: statusCommand,
+  status: (args, deps) => statusCommand(args, setupDeps(deps)),
+  setup: (args, deps) => setupCommand(args, setupDeps(deps)),
+  on: (_args, deps) => onCommand(setupDeps(deps)),
+  off: (_args, deps) => offCommand(setupDeps(deps)),
+  update: (args, deps) =>
+    updateCommand(args, {
+      paths: pathsFor(deps.home),
+      runner: deps.runner ?? real("process runner", () => realProcessRunner),
+      fetch: deps.fetch ?? fetch,
+      arch: deps.arch ?? process.arch,
+      uid: deps.uid ?? process.getuid?.() ?? 0,
+      now: () => (deps.clock ?? realClock).now(),
+      out: deps.out,
+      err: deps.err,
+      ...(deps.releaseBaseUrl ? { releaseBaseUrl: deps.releaseBaseUrl } : {}),
+    }),
   listen: (args, deps) =>
     listenCommand(args, { paths: pathsFor(deps.home), out: deps.out, err: deps.err, call: deps.call ?? callHelper }),
   daemon: (_args, deps) => (deps.runDaemon ? deps.runDaemon() : runDaemon({ home: deps.home, env: deps.env })),
@@ -156,6 +192,7 @@ if (import.meta.main) {
     out: (text) => void process.stdout.write(text),
     err: (text) => void process.stderr.write(text),
     readStdin: () => Bun.stdin.text(),
+    readSecret,
   };
   process.exit(await runCli(process.argv.slice(2), deps));
 }

@@ -103,6 +103,12 @@ export async function daemonKit(o: DaemonKitOptions = {}) {
       out: (t) => void out.push(t),
       err: (t) => void err.push(t),
       readStdin: async () => c.stdin ?? "",
+      keychain,
+      runner,
+      clock,
+      which: () => null,
+      uid: 501,
+      restBaseUrl: rest.baseUrl,
     };
     const code = await runCli(argv, deps);
     return { code, out: out.join(""), err: err.join("") };
