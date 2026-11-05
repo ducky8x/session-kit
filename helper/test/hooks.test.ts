@@ -246,6 +246,15 @@ describe("timing", () => {
 });
 
 describe("hook dispatch", () => {
+  test("every event hooks/discord.sh runs has a handler", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { HOOKS } = await import("../src/main.ts");
+    const wrapper = readFileSync(new URL("../../hooks/discord.sh", import.meta.url), "utf8");
+    const events = /session-start \| session-end \| notification \| pre-ask \| post-ask \| stop\)/.exec(wrapper);
+    expect(events).not.toBeNull();
+    expect(Object.keys(HOOKS).sort()).toEqual(["notification", "post-ask", "pre-ask", "session-end", "session-start", "stop"]);
+  });
+
   test("an event this version does not know exits 0 with nothing printed", async () => {
     const h = harness();
     expect(await runCli(["hook", "some-future-event"], h.deps)).toBe(0);
