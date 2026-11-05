@@ -33,6 +33,8 @@ export const callHelper: CallHelper = (socketPath, request, opts = {}) =>
   new Promise((resolve, reject) => {
     const decoder = new TextDecoder();
     let buffer = "";
+    // What the socket has not taken yet: a large request goes out over several writes.
+    let unsent: Uint8Array | null = new TextEncoder().encode(`${JSON.stringify(request)}\n`);
     let settled = false;
     let socket: { end(): void } | null = null;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -57,13 +59,22 @@ export const callHelper: CallHelper = (socketPath, request, opts = {}) =>
     }
     opts.signal?.addEventListener("abort", () => finish(() => reject(new HelperError("aborted", "Stopped."))));
 
+    const flush = (s: { write(data: Uint8Array): number }) => {
+      if (unsent === null) return;
+      const written = s.write(unsent);
+      unsent = written >= unsent.length ? null : unsent.subarray(Math.max(0, written));
+    };
+
     Bun.connect({
       unix: socketPath,
       socket: {
         open(s) {
           socket = s;
           if (settled) s.end();
-          else s.write(`${JSON.stringify(request)}\n`);
+          else flush(s);
+        },
+        drain(s) {
+          flush(s);
         },
         data(_s, chunk) {
           buffer += decoder.decode(chunk, { stream: true });

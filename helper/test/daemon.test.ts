@@ -260,6 +260,18 @@ describe("daemon inbound seam", () => {
     expect(k.daemon.sessions.get(SID)!.lastMessageAt).toBe(k.clock.now());
   });
 
+  test("a tagged post reports its message id once it is out", async () => {
+    const k = await daemonKit();
+    await k.connected();
+    await k.register(SID);
+    const posted: { tag: string | null; messageId: string }[] = [];
+    k.daemon.onPosted((e) => posted.push({ tag: e.tag, messageId: e.messageId }));
+    k.daemon.post(SID, "question 1", { tag: "q-1", ping: true });
+    await waitFor(() => posted.length === 1);
+    expect(posted[0]!.tag).toBe("q-1");
+    expect(k.rest.posted().find((m) => m.id === posted[0]!.messageId)?.content).toBe(`<@${OWNER_ID}> question 1`);
+  });
+
   test("post to control goes to #session-kit", async () => {
     const k = await daemonKit();
     await k.connected();

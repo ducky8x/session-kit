@@ -40,6 +40,8 @@ export interface OutboxEntry {
   target: string;
   content: string;
   allowedMentions: AllowedMentions;
+  /** A label the poster picks, handed back when the post goes out (to find the message again, say to edit it). */
+  tag?: string;
   /** The post already met a deleted channel once; a second time drops it. */
   remade?: boolean;
 }

@@ -133,9 +133,11 @@ export class NamePoller {
   private schedule(ms: number): void {
     this.timer = this.d.clock.setTimeout(() => {
       this.timer = null;
-      void this.poll().finally(() => {
-        if (this.running) this.schedule(this.d.intervalMs ?? POLL_INTERVAL_MS);
-      });
+      void this.poll()
+        .catch((error) => this.d.log.warn(`name poll failed: ${(error as Error).message}`))
+        .finally(() => {
+          if (this.running) this.schedule(this.d.intervalMs ?? POLL_INTERVAL_MS);
+        });
     }, ms);
   }
 

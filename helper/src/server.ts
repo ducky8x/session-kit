@@ -56,6 +56,7 @@ export class HandlerRegistry {
 }
 
 interface Connection {
+  decoder: TextDecoder;
   buffer: string;
   started: boolean;
   closed: boolean;
@@ -104,7 +105,15 @@ export class ControlServer {
         unix: this.socketPath,
         socket: {
           open: (socket) => {
-            socket.data = { buffer: "", started: false, closed: false, cleanups: [], pending: null, endAfterFlush: false };
+            socket.data = {
+              decoder: new TextDecoder(),
+              buffer: "",
+              started: false,
+              closed: false,
+              cleanups: [],
+              pending: null,
+              endAfterFlush: false,
+            };
             this.sockets.add(socket);
           },
           data: (socket, chunk) => this.onData(socket, chunk),
@@ -153,7 +162,7 @@ export class ControlServer {
   private onData(socket: Socket<Connection>, chunk: Uint8Array): void {
     const conn = socket.data;
     if (conn.started) return; // one request per connection
-    conn.buffer += Buffer.from(chunk).toString("utf8");
+    conn.buffer += conn.decoder.decode(chunk, { stream: true });
     if (conn.buffer.length > MAX_REQUEST) {
       socket.end();
       return;

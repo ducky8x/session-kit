@@ -49,6 +49,14 @@ export interface DiscordMessage extends ChannelMessage {
  */
 export type InboundHandler = (message: DiscordMessage, session: SessionEntry | null) => void | Promise<void>;
 
+/** A queued post reached Discord: the message's channel and id, and the tag it was posted with. */
+export interface PostedEvent {
+  target: string;
+  channelId: string;
+  messageId: string;
+  tag: string | null;
+}
+
 /** A session posted (`send`). `done` marks its run as finished. */
 export interface SendEvent {
   sessionId: string;
@@ -72,7 +80,8 @@ function optionalText(value: unknown): string | null {
  * but does not connect.
  *
  * Commands added later plug in through `handlers` (socket ops), `onInbound` (messages from Discord),
- * `onSend` (posts from sessions) and `onGatewayEvent` (any other gateway event).
+ * `onSend` (posts from sessions), `onPosted` (posts that reached Discord) and `onGatewayEvent` (any other
+ * gateway event). `extensions.ts` lists them.
  */
 export class Daemon {
   readonly handlers = new HandlerRegistry();
@@ -90,6 +99,7 @@ export class Daemon {
   private readonly noticeShown = new Set<string>();
   private readonly inboundHandlers: InboundHandler[] = [];
   private readonly sendListeners: ((event: SendEvent) => void)[] = [];
+  private readonly postedListeners: ((event: PostedEvent) => void)[] = [];
   private readonly dispatchListeners: ((type: string, data: any) => void)[] = [];
   private inboundChain: Promise<void> = Promise.resolve();
   private readonly background = new Set<Promise<unknown>>();
@@ -135,11 +145,20 @@ export class Daemon {
       onUnknownChannel: (entry) => {
         if (entry.target !== "control") this.sessions.unlink(entry.target);
       },
-      onPosted: (entry) => {
-        if (entry.target === "control") return;
-        this.sessions.update(entry.target, (e) => {
-          e.lastMessageAt = clock.now();
-        });
+      onPosted: (entry, channelId, messageId) => {
+        if (entry.target !== "control") {
+          this.sessions.update(entry.target, (e) => {
+            e.lastMessageAt = clock.now();
+          });
+        }
+        const event: PostedEvent = { target: entry.target, channelId, messageId, tag: entry.tag ?? null };
+        for (const listener of this.postedListeners) {
+          try {
+            listener(event);
+          } catch (error) {
+            log.warn(`a posted listener failed: ${(error as Error).message}`);
+          }
+        }
       },
     });
     this.names = new NamePoller({
@@ -165,6 +184,11 @@ export class Daemon {
     this.sendListeners.push(listener);
   }
 
+  /** A post went out (with the tag `post` was given). */
+  onPosted(listener: (event: PostedEvent) => void): void {
+    this.postedListeners.push(listener);
+  }
+
   /** Every gateway event (op 0), before the daemon's own handling. */
   onGatewayEvent(listener: (type: string, data: any) => void): void {
     this.dispatchListeners.push(listener);
@@ -182,11 +206,12 @@ export class Daemon {
 
   /**
    * Queue a post for a session's channel (`target` is its session id) or for `#session-kit` (`control`):
-   * split, with an @mention of the owner when `ping` is set. Returns how many messages it became.
+   * split, with an @mention of the owner when `ping` is set. `tag` comes back with each piece's
+   * `onPosted`. Returns how many messages it became.
    */
-  post(target: string, body: string, o: { ping?: boolean } = {}): number {
+  post(target: string, body: string, o: { ping?: boolean; tag?: string } = {}): number {
     const pieces = buildPosts(body, { ping: o.ping ?? false, ownerId: this.config.ownerId });
-    this.outbox.enqueue(pieces.map((p) => ({ ...p, target })));
+    this.outbox.enqueue(pieces.map((p) => ({ ...p, target, ...(o.tag === undefined ? {} : { tag: o.tag }) })));
     return pieces.length;
   }
 

@@ -27,6 +27,13 @@ describe("control socket", () => {
     expect(registry.ops()).toEqual(["echo"]);
   });
 
+  test("text outside ASCII arrives intact", async () => {
+    const registry = new HandlerRegistry().add("echo", (req) => ({ said: req.text }));
+    const { socketPath } = await serve(registry);
+    const text = `héllo 😀 ${"ü".repeat(70_000)}`;
+    expect((await callHelper(socketPath, { op: "echo", text })).said).toBe(text);
+  });
+
   test("the socket is user-only", async () => {
     const { socketPath } = await serve(new HandlerRegistry());
     expect(statSync(socketPath).mode & 0o777).toBe(0o600);

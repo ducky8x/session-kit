@@ -88,6 +88,16 @@ describe("sk-discord send", () => {
     expect(k.rest.posted(k.channelId).map((m) => m.content)).toEqual(paragraphs);
   });
 
+  test("a very long text (60 KB on stdin) arrives whole, in order", async () => {
+    const k = await connectedWithSession();
+    const lines = Array.from({ length: 1000 }, (_, i) => `line ${String(i).padStart(4, "0")} ${"é".repeat(50)}`);
+    expect((await k.cli(["send", "--session", SID, "-"], { stdin: lines.join("\n") })).code).toBe(0);
+    await k.daemon.settle();
+    const posted = k.rest.posted(k.channelId).map((m) => m.content);
+    expect(posted.length).toBeGreaterThan(25);
+    expect(posted.join("\n").split("\n")).toEqual(lines);
+  });
+
   test("exit 2 with the fix when the helper isn't running", async () => {
     const k = await daemonKit({ noStart: true });
     const r = await k.cli(["send", "--session", SID, "hello"]);
