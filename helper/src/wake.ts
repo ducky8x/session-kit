@@ -23,9 +23,13 @@ export function buildResumeCommand(o: { bin: string; sessionId: string; prompt: 
   return [o.bin, "--bg", "--resume", o.sessionId.toLowerCase(), o.prompt];
 }
 
+/** Terminal color and style codes, which the CLI puts around the short id when it prints in color. */
+const ANSI_CODES = /\u001b\[[0-9;]*m/g;
+
 /** The short id a launch prints on its `backgrounded · <id>` line, or null when it printed none. */
 export function parseBackgroundedId(stdout: string): string | null {
-  return /backgrounded\s*[^\s\w]\s*([0-9a-f]{8})\b/i.exec(stdout)?.[1]?.toLowerCase() ?? null;
+  const plain = stdout.replace(ANSI_CODES, "");
+  return /backgrounded\s*[^\s\w]\s*([0-9a-f]{8})\b/i.exec(plain)?.[1]?.toLowerCase() ?? null;
 }
 
 /** Does a failed resume say the session does not exist? */

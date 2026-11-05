@@ -37,6 +37,11 @@ describe("the wake command and prompt", () => {
     expect(parseBackgroundedId("woke session x\nbackgrounded · 0123abcd\n")).toBe("0123abcd");
     expect(parseBackgroundedId("started bg-1")).toBeNull();
   });
+
+  test("reads the short id when the CLI colors it", () => {
+    const colored = "backgrounded · \u001b[36m0123abcd\u001b[39m · demo\n\u001b[2m  claude agents   list sessions\u001b[22m\n";
+    expect(parseBackgroundedId(colored)).toBe("0123abcd");
+  });
 });
 
 describe("what state a session is in", () => {
