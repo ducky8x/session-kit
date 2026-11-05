@@ -129,9 +129,12 @@ export function parseReply(text: string, items: readonly AskItem[]): ParsedReply
   return { answers, raw: text, missing: items.map((_, i) => i + 1).filter((n) => !seen.has(n)) };
 }
 
-/** Words in a tool result that mean the dialog closed without an answer (the auto-continue timeout). */
+/** Words in a tool result that mean the dialog closed without an answer (the idle timeout). */
 const UNANSWERED_WORDS =
-  /away from (?:the|their|your) keyboard|did not (?:answer|respond)|didn't (?:answer|respond)|no answer|not answered|without an answer|timed out|auto-continue/i;
+  /away from (?:the |their |your )?keyboard|no response after|did not (?:answer|respond)|didn't (?:answer|respond)|no answer|not answered|without an answer|timed out|auto-continue/i;
+
+/** Fields of a result that hold the questions or the user's own words. Their text never decides the outcome. */
+const USER_FIELDS = new Set(["questions", "answers", "annotations", "response"]);
 
 function textOf(value: unknown): string {
   if (typeof value === "string") return value;
@@ -140,22 +143,46 @@ function textOf(value: unknown): string {
   return "";
 }
 
+function filled(value: unknown): boolean {
+  return textOf(value).trim() !== "";
+}
+
+/** Notes the user typed on any question (`annotations: { [question]: { notes } }`). */
+function hasNotes(annotations: unknown): boolean {
+  if (!annotations || typeof annotations !== "object") return false;
+  return Object.values(annotations as Record<string, unknown>).some(
+    (a) => a !== null && typeof a === "object" && filled((a as Record<string, unknown>).notes),
+  );
+}
+
 /**
- * Did the user answer the dialog? PostToolUse also runs when `askUserQuestionTimeout` closes it unanswered,
- * so the result decides: an `answers` object with at least one non-empty answer (or a text result) counts as
- * answered, unless the result says the user may be away or did not answer.
+ * Did the user answer the dialog? `tool_response` is the tool's result: `questions`, `answers` (question text
+ * to the chosen label, or a list for a multi-select question) and, from the terminal, `annotations`.
+ *
+ * When `askUserQuestionTimeout` closes the dialog, PostToolUse still runs. The result then carries
+ * `afkTimeoutMs`, and `answers` holds only what was picked before the user went idle, so the result counts as
+ * unanswered. A typed `response`, a `followUp` request or notes mean the user is there. Otherwise answered
+ * takes at least one non-empty answer. A text result counts as answered unless it reads like the timeout;
+ * quoted questions and answers are left out of that check.
  */
 export function classifyAskResponse(response: unknown): "answered" | "unanswered" {
   if (response === null || response === undefined) return "unanswered";
-  const words = textOf(response);
-  if (UNANSWERED_WORDS.test(words)) return "unanswered";
-  if (typeof response === "object" && !Array.isArray(response) && "answers" in (response as object)) {
-    const answers = (response as { answers?: unknown }).answers;
-    if (!answers || typeof answers !== "object") return "unanswered";
-    const given = Object.values(answers as Record<string, unknown>).filter((v) => textOf(v).trim() !== "");
-    return given.length > 0 ? "answered" : "unanswered";
+  if (typeof response !== "object" || Array.isArray(response)) {
+    const words = textOf(response);
+    return words.trim() === "" || UNANSWERED_WORDS.test(words.replace(/"[^"]*"/g, '""')) ? "unanswered" : "answered";
   }
-  return words.trim() === "" ? "unanswered" : "answered";
+  const r = response as Record<string, unknown>;
+  if (r.afkTimeoutMs !== undefined && r.afkTimeoutMs !== null) return "unanswered";
+  const other = Object.entries(r)
+    .filter(([key]) => !USER_FIELDS.has(key))
+    .map(([, value]) => textOf(value))
+    .join("\n");
+  if (UNANSWERED_WORDS.test(other)) return "unanswered";
+  if (r.followUp === true || filled(r.response) || hasNotes(r.annotations)) return "answered";
+  if (!("answers" in r)) return other.trim() === "" ? "unanswered" : "answered";
+  const answers = r.answers;
+  if (!answers || typeof answers !== "object") return "unanswered";
+  return Object.values(answers as Record<string, unknown>).some(filled) ? "answered" : "unanswered";
 }
 
 /** Read `tool_input.questions` (or a request's `questions`) into items. Null when it is not a question list. */
