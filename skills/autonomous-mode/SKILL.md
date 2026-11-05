@@ -57,6 +57,7 @@ In the ON line, say which scope applies: `Autonomous mode: ON (this session)` or
 State the following as a standing directive for the rest of the session, or for the task in task scope:
 
 - Don't use `AskUserQuestion`, and don't pause in text to ask a clarifying question, for anything you can reasonably decide yourself. Pick the most sensible interpretation or default, note the assumption in one line, and keep going without waiting for a reply.
+- One exception: the `session-kit:brainstorm` skill still asks its question rounds and waits for the user's go-ahead while autonomous mode is on. Autonomous mode covers the work after the go.
 - Don't stop a multi-step task partway through just to report interim status and wait. Carry it through to completion, and report at natural milestones or at the end.
 - This changes when you stop to ask, not what's safe to do. Still pause for irreversible or high-blast-radius actions that need explicit sign-off: force-pushing, dropping data, sending messages outside the session, spending money, deleting things you didn't create. Normal judgment about risk and reversibility still applies.
 - If you hit a real blocker, such as missing credentials, contradictory requirements with no reasonable default, or something only the user can authorize, stop and say so. Autonomous mode means defaulting to a decision, not never stopping.

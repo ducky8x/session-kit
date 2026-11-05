@@ -1,6 +1,6 @@
 # session-kit
 
-session-kit is a Claude Code plugin that sets up every session the same way. When a session starts, it asks whether one agent should do the work or coordinate worker agents, and whether the session should run autonomously. It also loads your standing rules into every session and subagent, and keeps a short per-project brief that new sessions read first.
+session-kit is a Claude Code plugin that sets up every session the same way. When a session starts, it asks whether one agent should do the work or coordinate worker agents, and whether the session should run autonomously. It also loads your standing rules into every session and subagent, and keeps a short per-project brief that new sessions read first. For a bigger task, it can work out a detailed spec with you and build it once you say go.
 
 ## Install
 
@@ -52,10 +52,25 @@ After a summary of the chat (compaction), a resume or a fork, the hook restates 
 | `/session-kit:load-context` | Reads every `.agentcontext` file in the current folder and its parents, plus the README each one points to. |
 | `/session-kit:create-context` | Writes a `.agentcontext` brief for the current project and keeps it out of git. |
 | `/session-kit:update-context` | Updates `.agentcontext` with what the session finished and what's left, and prunes stale lines. |
+| `/session-kit:brainstorm` | Plans a task with you before building it. Claude researches the project, asks rounds of questions, writes a spec to `.task/<name>.md`, and starts building only when you say go. |
 
 Claude also runs these skills on its own when a request matches, such as "go autonomous" or "catch me up".
 
-Each skill also answers to its bare name, such as `/start`, as long as no other skill or command uses that name. Claude Code has no built-in `/start`. If you have a personal skill with the same name, the bare name runs yours, and the `/session-kit:` name runs the plugin's.
+Each skill also answers to its bare name, such as `/start`, as long as no other skill or command uses that name. Claude Code has no built-in `/start`. If you have a personal skill with the same name, the bare name runs yours, and the `/session-kit:` name runs the plugin's. The superpowers plugin's skill is named `brainstorming`, so bare `/brainstorm` doesn't collide with it.
+
+## Task specs
+
+Ask Claude to brainstorm, plan or spec out a task ("let's brainstorm the export feature", or `/session-kit:brainstorm` followed by the task), and it writes a spec before building anything. Each task gets one file, `.task/<name>.md`, in the current folder. Inside a git repo, the skill adds `.task/` to the clone's private exclude file unless git already ignores it, so specs stay out of your commits.
+
+1. Claude reads the code, the docs and `.agentcontext` first, so it doesn't ask what the project already answers.
+2. It splits the task into parts and drafts the spec.
+3. It asks rounds of questions, up to four at a time, each with a default, until every part is covered in the same detail: what it does, inputs and outputs, edge cases, how it's built and how it's verified.
+4. It asks whether you want to read the full spec or a short summary in chat, then asks for a go-ahead or what to change.
+5. On your go, it works through the spec's plan, ticks off each step, and notes in the spec anything it had to do differently.
+
+The questions and the go-ahead run even when autonomous mode is on. Autonomous mode applies to the work after the go. If a round of questions goes unanswered, Claude takes the defaults, marks them as unanswered in the spec's Decisions log, and finishes the spec, but it still waits for your go before building anything.
+
+Each spec has a status (drafting, awaiting go-ahead, approved, in progress, done). When `/session-kit:load-context` briefs you on a project, it names the specs that aren't done yet.
 
 ## Your rules file
 
@@ -91,5 +106,5 @@ The tests run each hook with a temporary `HOME`, so they never touch your real `
 
 ## If you already have your own versions
 
-- **Skills with the same names** in `~/.claude/skills` (`start`, `autonomous-mode`, `load-context`, `create-context`, `update-context`): remove or rename them. Otherwise both copies load, Claude sees two skills for the same job, and the bare `/name` runs your copy.
+- **Skills with the same names** in `~/.claude/skills` (`start`, `autonomous-mode`, `load-context`, `create-context`, `update-context`, `brainstorm`): remove or rename them. Otherwise both copies load, Claude sees two skills for the same job, and the bare `/name` runs your copy.
 - **SessionStart or SubagentStart hooks** in `~/.claude/settings.json` that ask setup questions or inject a rules file: remove them. Plugin hooks run alongside the hooks in your settings, so you'd get both. Move your rules into `~/.claude/session-kit/rules.md`.
