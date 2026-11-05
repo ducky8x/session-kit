@@ -4,5 +4,6 @@
   "description": "Sets up each Claude Code session: single-agent or multi-agent, autonomous mode, standing rules for every session and subagent, per-project context files, and task specs you approve before building.",
   "author": {
     "name": "ducky8x"
-  }
+  },
+  "license": "MIT"
 }
