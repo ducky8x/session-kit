@@ -1,7 +1,7 @@
 {
   "name": "session-kit",
   "version": "0.1.0",
-  "description": "Sets up each Claude Code session: single-agent or multi-agent, autonomous mode, standing rules for every session and subagent, and per-project context files.",
+  "description": "Sets up each Claude Code session: single-agent or multi-agent, autonomous mode, standing rules for every session and subagent, per-project context files, and task specs you approve before building.",
   "author": {
     "name": "ducky8x"
   }
