@@ -94,7 +94,7 @@ When the session-start hook prints `Discord: #<channel> (<category>)` with a lis
 
 - Run `~/.claude/session-kit/bin/sk-discord listen --session <id>` as a background command (the Bash tool with `run_in_background`). Don't use Monitor: it expires after 30 minutes at most, and every expiry costs a turn.
 - The listener waits for one event, prints it as one JSON line and exits, so an idle session costs nothing. When its output arrives, handle the event, then start the listener again.
-- Start it again after every event except `disabled` and `unlinked`. Keep exactly one running: after a summary of the chat, the one you started earlier may still be running, so check your background tasks first.
+- Start it again after every event except `disabled`, `unlinked` and `replaced`. Keep exactly one running: after a summary of the chat, the one you started earlier may still be running, so check your background tasks first. If two do run, the helper keeps the newer one and ends the older one with `replaced`.
 - Don't poll. Events come to you.
 - Events that arrived while nothing was listening come with `"queued": true`. Handle them in order, like any other event.
 
@@ -130,6 +130,7 @@ Each line from the listener is JSON with a `type`:
 - `checkin`: the helper posted its hourly check-in. These continue until a post with `--done`. You may add one short status line with `send`; nothing else is needed.
 - `disabled`: Discord was turned off. Stop listening and posting, don't start the listener again, and say so in one line at the keyboard.
 - `unlinked`: this session's channel is gone (deleted by hand, or removed after a month without messages). Don't start the listener again now. A later post creates a new channel; start the listener again after that post.
+- `replaced`: a newer listener for this session took over, for example one started after a summary of the chat. Don't start the listener again; the newer one is already running.
 - `helper-down` (the listener exits with code 2): the helper isn't running. Start the listener once more. If it's down again, tell the user at the keyboard, with the fix `launchctl kickstart -k gui/$UID/io.github.ducky8x.session-kit.discord`, and start the listener again when they say it's back or `status` shows `connected`.
 
 ### Messages that arrive between listeners
