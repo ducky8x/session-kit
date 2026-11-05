@@ -164,8 +164,11 @@ run_hook "$SESSION_START" "$(start_input s-r startup)"
 expect_has "a rules file of exactly 8000 bytes is included whole" "$rules_text"
 expect_under "startup output with an 8000-byte rules file stays under 10,000" 10000
 
+mkdir -p "$(state_dir)"
 echo '{"workflow":"multi","autonomous":{"on":true,"scope":"task","task":"'"$(awk 'BEGIN{for(i=0;i<600;i++)printf "t"}')"'"}}' > "$(state_dir)/s-r.json"
 run_hook "$SESSION_START" "$(start_input s-r resume)"
+expect_has "resume restates a setup with a long task" "Session setup (restored): Workflow: multi-agent"
+expect_has "a long task is cut short in the restated line" "ttt... is done)"
 expect_has "resume output still includes the 8000-byte rules file" "$rules_text"
 expect_under "resume output with a long task and an 8000-byte rules file stays under 10,000" 10000
 
