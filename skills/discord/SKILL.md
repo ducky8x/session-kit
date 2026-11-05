@@ -9,6 +9,12 @@ session-kit's Discord helper, `sk-discord`, runs in the background on the user's
 
 - The helper is `~/.claude/session-kit/bin/sk-discord`. Its settings are in `~/.claude/session-kit/discord/config.json` (`enabled` and `offered`, among others), and its log is `helper.log` in the same folder.
 - This session's id is `${CLAUDE_SESSION_ID}`. If that shows a placeholder instead of an id, use the `Session id:` line from the session-start hook. Commands below write it as `<id>`.
+- Plugin version: the helper follows it, and setup and updates install that version. Read it with:
+
+  ```bash
+  sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json" | head -n 1
+  ```
+
 - The helper is macOS-only for now. On any other system, say so in one line for every `/discord` command and change nothing.
 - The full name of the command is `/session-kit:discord`; `/discord` works too when no other skill uses that name.
 
@@ -24,7 +30,7 @@ When the user typed a `/discord` command, run it; with no argument, treat it as 
 1. Not macOS (`uname -s` isn't `Darwin`): say "The Discord helper is macOS-only for now." and stop.
 2. If `~/.claude/session-kit/bin/sk-discord` doesn't exist, start the guided setup at step 1.
 3. Otherwise run `~/.claude/session-kit/bin/sk-discord on`, then `~/.claude/session-kit/bin/sk-discord status`.
-   - `connected`: make sure `config.json` has `"offered": true` (step 8), say Discord is on, and connect this session (see "After setup").
+   - `connected`: make sure `config.json` has `"offered": true` (if not, set it with the Edit tool and change nothing else), say Discord is on, and connect this session (see "After setup").
    - Any other code: pick up the guided setup at the step that fixes it (see "Status codes"), and carry on from there to the end.
 
 ### /discord off
@@ -49,12 +55,7 @@ Run `~/.claude/session-kit/bin/sk-discord status` and give the user its code and
 The helper follows the plugin's version: the session-start hook starts an update by itself when they differ. This command does the same on demand.
 
 1. Without the helper, run the guided setup from step 1 instead.
-2. Read the plugin's version:
-
-   ```bash
-   sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json" | head -n 1
-   ```
-
+2. Read the plugin's version (see "Plugin version" above).
 3. Tell the user which version you're installing, then run `~/.claude/session-kit/bin/sk-discord update --version <version>`. It downloads the release, checks its SHA-256 against the release's `checksums.txt`, swaps the binary and restarts the helper.
 4. Run `status`. If it says `update-failed`, the old helper is still in place; say so, and offer to reinstall with step 1 of the guided setup.
 
@@ -71,101 +72,15 @@ The helper follows the plugin's version: the session-start hook starts an update
 | `not-in-server` | The bot isn't in the server | Setup steps 4 and 5 |
 | `update-failed` | The last update didn't install | `/discord update`, or setup step 1 |
 
-If `status` says the helper isn't running, go to step 6. When `status` prints its own fix, follow that.
+If `status` says the helper isn't running, go to setup step 6. When `status` prints its own fix, follow that.
 
 ## Guided setup
 
-Run the steps in order, one at a time. After each step, stop and wait for the user to say it's done before you start the next one. Skip a step only when its result is already in place (the binary exists, `status` no longer says `no-token`, and so on). These steps need the user's hands, so they wait for the user even in autonomous mode. If the user stops partway, say which step is next and that `/discord on` picks it up later.
+To set up, or to finish a setup that stopped partway, read `${CLAUDE_SKILL_DIR}/setup.md` with the Read tool and follow it. It has eight steps, run one at a time, waiting for the user after each; "Setup step" in the table above means a step there.
 
-### 1. Install the helper
+The session never asks for, sees, handles or types the bot token. The user pastes it only into `sk-discord setup token` in their own terminal, never into the chat. If a token shows up in the chat anyway, don't use it or repeat it, and tell the user to reset it in the developer portal.
 
-Find the file and its size first, and tell the user the file name, where it comes from and how big it is. Download only after the user agrees.
-
-```bash
-v=$(sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json" | head -n 1)
-if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then arch=arm64; else arch=x64; fi
-url="https://github.com/ducky8x/session-kit/releases/download/v$v/sk-discord-darwin-$arch"
-echo "$url"
-curl -sIL "$url" | tr -d '\r' | sed -n 's/^[Cc]ontent-[Ll]ength: *//p' | tail -n 1
-```
-
-The last line is the size in bytes; give it in MB. If the release isn't found, say that the helper for version `v<version>` isn't published yet, and stop the setup.
-
-After the user agrees, download it with its checksums, check the hash, and install it:
-
-```bash
-v=$(sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json" | head -n 1)
-if [ "$(sysctl -n hw.optional.arm64 2>/dev/null)" = 1 ]; then arch=arm64; else arch=x64; fi
-base="https://github.com/ducky8x/session-kit/releases/download/v$v"
-file="sk-discord-darwin-$arch"
-dir="$HOME/.claude/session-kit/bin"
-mkdir -p "$dir" &&
-  curl -fsSL -o "$dir/sk-discord.new" "$base/$file" &&
-  curl -fsSL -o "$dir/checksums.txt" "$base/checksums.txt" &&
-  want=$(grep -F "$file" "$dir/checksums.txt" | head -n 1 | cut -d ' ' -f 1) &&
-  have=$(shasum -a 256 "$dir/sk-discord.new" | cut -d ' ' -f 1) &&
-  [ -n "$want" ] && [ "$want" = "$have" ] &&
-  chmod 755 "$dir/sk-discord.new" &&
-  mv "$dir/sk-discord.new" "$dir/sk-discord" &&
-  "$dir/sk-discord" --version
-ok=$?
-rm -f "$dir/sk-discord.new" "$dir/checksums.txt"
-[ "$ok" -eq 0 ]
-```
-
-If it fails, nothing was installed; say whether the download or the checksum failed. The binary is signed ad hoc, not notarized. A Mac managed by an organization may still block it; if it won't run, say so and stop.
-
-When the helper was installed before and only the binary went missing, the later steps may still be in place. Run `status` after installing and go by "Status codes"; if it says the helper isn't running and `config.json` already names a server (`guildId`), go on with step 6.
-
-### 2. Server and bot
-
-The user does this in Discord and in the developer portal:
-
-1. Create a private server, or pick one they own that has no other members. Tell them to keep it to themselves: anyone else in the server can read every session's posts.
-2. At https://discord.com/developers/applications, create an application, open its Bot page and turn on **Message Content Intent** (under Privileged Gateway Intents). Without it the bot can't read what they type.
-3. Keep the portal open: step 3 needs the bot's token from the Bot page, and step 4 needs the Application ID from the General Information page.
-
-### 3. The bot token
-
-The session never asks for, sees, handles or types the bot token. The user puts it into the helper themselves:
-
-- Tell them to open their own terminal (Terminal, iTerm or similar, outside this session), run `~/.claude/session-kit/bin/sk-discord setup token`, and paste the token there. Input is hidden, and the helper stores it in the macOS Keychain. The token comes from the portal's Bot page (**Reset Token** shows a new one).
-- Tell them never to paste the token into this chat.
-- Don't run `setup token` yourself in any form: not with the Bash tool, not in a terminal tab you open, not any other way.
-- If the user pastes a token into the chat anyway, don't use it and don't repeat it. Tell them it's now in the conversation's transcript, so they should reset it in the portal and run `setup token` with the new one.
-
-When they say it's done, run `~/.claude/session-kit/bin/sk-discord status`. If it still says `no-token`, the token wasn't saved; ask them to run the command again.
-
-### 4. Invite the bot
-
-Ask the user for the Application ID from the portal's General Information page. It's a public number, not a secret. Run `~/.claude/session-kit/bin/sk-discord setup invite --app-id <id>` and show the link it prints. The user opens it, picks their server and authorizes the bot.
-
-### 5. Pick the server
-
-Run `~/.claude/session-kit/bin/sk-discord setup server`. It lists the servers the bot is in.
-
-- With one server, it picks that one. With more, ask the user which one (`AskUserQuestion`, with the server names as options) and give the choice to `setup server` the way its output says.
-- The owner, the only person whose messages the bot reads, is the server's owner. Show the user the owner's name the command prints and ask them to confirm it's their account. If it isn't, stop: the server has to be one they own.
-- It creates the categories Desktop, VS Code, CLI and Archive and the `#session-kit` channel, and posts a welcome there.
-
-### 6. Start the helper
-
-Run `~/.claude/session-kit/bin/sk-discord setup launch-agent`. It installs the LaunchAgent that starts the helper at login and starts it now. Then run `status`, waiting a few seconds between tries, until it shows `connected`. If it shows `off`, the helper is running but Discord isn't switched on yet: run `sk-discord on` (step 8's switch) and check again. For any other code, follow "Status codes".
-
-### 7. Notifications
-
-Tell the user, in these words: "Keep Discord notifications on. Set this server to All Messages (server name > Notification Settings) so every post reaches you; the bot @mentions you only when a session is waiting on you." The welcome post in `#session-kit` says the same.
-
-Then tell them two more things:
-
-- While a question dialog is open in a session, that session can't act on an answer from Discord until the dialog closes. With `askUserQuestionTimeout` set in their Claude Code settings, the dialog closes by itself after that time; without it, an answer from Discord waits until someone is at the keyboard.
-- Keep the server to themselves: anyone added to it can read every post.
-
-### 8. Turn it on
-
-Run `~/.claude/session-kit/bin/sk-discord on` if step 6 didn't already, so `config.json` has `"enabled": true`. Read `config.json`; if `offered` isn't `true`, set it to `true` with the Edit tool and change nothing else. Then say Discord is set up, and connect this session.
-
-### After setup
+## After setup
 
 This session started before Discord was on, so it has no channel yet. Its first post creates one: send a short line, such as `~/.claude/session-kit/bin/sk-discord send --session <id> "Connected to Discord."`, then start the listener (see "The listener"). New sessions get their channel by themselves.
 
