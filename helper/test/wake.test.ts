@@ -63,6 +63,13 @@ describe("what state a session is in", () => {
     expect(status([{ pid: 7, sessionId: SID.toUpperCase(), kind: "interactive" }])).toEqual({ kind: "interactive" });
   });
 
+  test("a background session that failed or was stopped, with its process alive, is finished like a done one", () => {
+    for (const state of ["done", "failed", "stopped"]) {
+      expect(status([bg({ state, status: undefined })])).toEqual({ kind: "idle", shortId: "a1b2c3d4" });
+      expect(status([bg({ state, status: "idle" })])).toEqual({ kind: "idle", shortId: "a1b2c3d4" });
+    }
+  });
+
   test("presence in one word", () => {
     expect(presenceOf(null)).toBe("unknown");
     expect(presenceOf({ kind: "absent" })).toBe("closed");

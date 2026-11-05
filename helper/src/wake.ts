@@ -47,10 +47,13 @@ export type SessionStatus =
   | { kind: "stopped"; shortId?: string }
   /** It is open in the desktop app, VS Code or a terminal (or alive with nothing to stop it by): never resumed. */
   | { kind: "interactive" }
-  /** A background session whose process lives on but is idle or done: it can be stopped, then resumed. */
+  /** A background session whose process lives on but is idle or finished: it can be stopped, then resumed. */
   | { kind: "idle"; shortId: string }
   /** A background session that is working, or waiting on a prompt: left alone. */
   | { kind: "busy"; blocked: boolean; shortId?: string };
+
+/** The `state` values of a background session that has finished: done, failed, or stopped. */
+const FINISHED_STATES = new Set(["done", "failed", "stopped"]);
 
 /** Look the session up in the CLI's list. `pidAlive` guards against a row whose process is already gone. */
 export function sessionStatus(entries: readonly AgentEntry[], sessionId: string, pidAlive: (pid: number) => boolean): SessionStatus {
@@ -67,7 +70,7 @@ export function sessionStatus(entries: readonly AgentEntry[], sessionId: string,
   const state = row.state?.toLowerCase();
   const status = row.status?.toLowerCase();
   if (state === "blocked" || status === "waiting") return { kind: "busy", blocked: true, shortId: row.id! };
-  if (state === "done" || status === "idle") return { kind: "idle", shortId: row.id! };
+  if ((state !== undefined && FINISHED_STATES.has(state)) || status === "idle") return { kind: "idle", shortId: row.id! };
   return { kind: "busy", blocked: false, shortId: row.id! };
 }
 
