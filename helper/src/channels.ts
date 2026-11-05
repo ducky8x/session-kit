@@ -187,6 +187,7 @@ export class ChannelManager {
   private sweepTimer: TimerHandle | null = null;
   private sweepRun: Promise<void> | null = null;
   private stopped = false;
+  private reconciled = false;
 
   constructor(private readonly d: ChannelDeps) {
     this.timing = d.timing ?? DEFAULT_TIMING;
@@ -283,37 +284,45 @@ export class ChannelManager {
    * and archive flag follow what is on Discord.
    */
   reconcile(): Promise<void> {
-    return this.exclusive(async () => {
-      const guildId = this.config().guildId;
-      if (guildId === null) return;
-      const list = await this.d.rest.request<unknown[]>("GET", `/guilds/${guildId}/channels`);
-      this.cache.clear();
-      for (const raw of Array.isArray(list) ? list : []) {
-        const channel = asChannel(raw);
-        if (channel) this.cache.set(channel.id, channel);
-      }
-      const unlinked = this.d.sessions.unlinkMissing(new Set(this.cache.keys()));
-      if (unlinked.length > 0) this.d.log.info(`unlinked ${unlinked.length} sessions whose channels are gone`);
-      const gone = Object.entries(this.config().categories)
-        .filter(([, id]) => this.cache.get(id)?.type !== 4)
-        .map(([key]) => key);
-      if (gone.length > 0) {
-        updateConfig(this.d.paths, (c) => {
-          for (const key of gone) delete c.categories[key];
+    return this.exclusive(() => this.reconcileLocked());
+  }
+
+  /** Changes to the layout need the server's list first; the first one after a start reads it. */
+  private async ready(): Promise<void> {
+    if (!this.reconciled) await this.reconcileLocked();
+  }
+
+  private async reconcileLocked(): Promise<void> {
+    const guildId = this.config().guildId;
+    if (guildId === null) return;
+    const list = await this.d.rest.request<unknown[]>("GET", `/guilds/${guildId}/channels`);
+    this.cache.clear();
+    for (const raw of Array.isArray(list) ? list : []) {
+      const channel = asChannel(raw);
+      if (channel) this.cache.set(channel.id, channel);
+    }
+    const unlinked = this.d.sessions.unlinkMissing(new Set(this.cache.keys()));
+    if (unlinked.length > 0) this.d.log.info(`unlinked ${unlinked.length} sessions whose channels are gone`);
+    const gone = Object.entries(this.config().categories)
+      .filter(([, id]) => this.cache.get(id)?.type !== 4)
+      .map(([key]) => key);
+    if (gone.length > 0) {
+      updateConfig(this.d.paths, (c) => {
+        for (const key of gone) delete c.categories[key];
+      });
+    }
+    for (const entry of this.d.sessions.all()) {
+      if (entry.channelId === null) continue;
+      const channel = this.cache.get(entry.channelId)!;
+      const archived = this.isArchiveCategory(channel.parent_id);
+      if (channel.name !== entry.channelName || archived !== entry.archived) {
+        this.d.sessions.update(entry.sessionId, (e) => {
+          e.channelName = channel.name;
+          e.archived = archived;
         });
       }
-      for (const entry of this.d.sessions.all()) {
-        if (entry.channelId === null) continue;
-        const channel = this.cache.get(entry.channelId)!;
-        const archived = this.isArchiveCategory(channel.parent_id);
-        if (channel.name !== entry.channelName || archived !== entry.archived) {
-          this.d.sessions.update(entry.sessionId, (e) => {
-            e.channelName = channel.name;
-            e.archived = archived;
-          });
-        }
-      }
-    });
+    }
+    this.reconciled = true;
   }
 
   /** The gateway has a new session: read the server again and make the channels that were waiting for it. */
@@ -412,6 +421,7 @@ export class ChannelManager {
   /** The session's channel, made if it has none and moved out of Archive if it is there. Null: no such session. */
   ensureChannel(sessionId: string): Promise<string | null> {
     return this.exclusive(async () => {
+      await this.ready();
       const entry = this.d.sessions.get(sessionId);
       if (!entry) return null;
       if (entry.channelId === null) return this.create(entry);
@@ -428,6 +438,7 @@ export class ChannelManager {
   /** Move an archived session's channel back to its surface's category. */
   unarchive(sessionId: string): Promise<void> {
     return this.exclusive(async () => {
+      await this.ready();
       const entry = this.d.sessions.get(sessionId);
       if (entry?.channelId && entry.archived) await this.move(entry, false);
     });
@@ -596,7 +607,7 @@ export class ChannelManager {
 
   /** Rename when the wanted name differs: now, or once five minutes have passed since the last rename. */
   private requestRename(sessionId: string): void {
-    if (this.stopped || this.renameTimers.has(sessionId) || this.renaming.has(sessionId)) return;
+    if (this.stopped || !this.d.isOnline() || this.renameTimers.has(sessionId) || this.renaming.has(sessionId)) return;
     const entry = this.d.sessions.get(sessionId);
     if (!entry || entry.channelId === null) return;
     if (this.wantedName(entry) === entry.channelName) return;
@@ -654,6 +665,7 @@ export class ChannelManager {
     if (this.sweepRun) return this.sweepRun;
     const run = this.exclusive(async () => {
       if (!this.d.isOnline()) return;
+      await this.ready();
       const now = this.d.clock.now();
       for (const entry of this.d.sessions.all()) {
         const quiet = now - entry.lastMessageAt;
@@ -677,8 +689,8 @@ export class ChannelManager {
   }
 
   startSweeper(): void {
-    if (this.sweepTimer !== null) return;
     this.stopped = false;
+    if (this.sweepTimer !== null) return;
     const tick = () => {
       this.sweepTimer = this.d.clock.setTimeout(() => {
         void this.track(this.sweep().catch(() => undefined));
@@ -688,9 +700,10 @@ export class ChannelManager {
     tick();
   }
 
-  /** Stop every timer (the daemon is shutting down). */
+  /** Stop every timer (Discord was turned off, or the daemon is shutting down). */
   stop(): void {
     this.stopped = true;
+    this.reconciled = false;
     if (this.sweepTimer !== null) this.d.clock.clearTimeout(this.sweepTimer);
     this.sweepTimer = null;
     for (const sessionId of [...this.renameTimers.keys()]) this.cancelRename(sessionId);

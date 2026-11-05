@@ -2,12 +2,33 @@ import { backoffMs } from "./backoff.ts";
 import type { Clock, TimerHandle } from "./clock.ts";
 import { type RestClient, RestError, UNKNOWN_CHANNEL } from "./discord/rest.ts";
 import type { Logger } from "./log.ts";
+import { DISCORD_MAX_TEXT, splitMessage } from "./split.ts";
 import { readJsonLines, writeFileAtomic } from "./state.ts";
 
 /** What Discord's `allowed_mentions` gets: who a post may notify. */
 export interface AllowedMentions {
   parse: string[];
   users?: string[];
+}
+
+/** One Discord message's worth of a post: its text and who it may notify. */
+export interface PostPiece {
+  content: string;
+  allowedMentions: AllowedMentions;
+}
+
+/**
+ * Turn a post into Discord messages: split to fit 2,000 characters, and with `ping`, an @mention of the owner
+ * at the start of the first piece. Mentions in the text itself (@everyone, roles, users) never notify anyone:
+ * `allowed_mentions` lists only the owner, and only on the piece that mentions them.
+ */
+export function buildPosts(text: string, o: { ping?: boolean; ownerId?: string | null } = {}): PostPiece[] {
+  const mention = o.ping && o.ownerId ? `<@${o.ownerId}> ` : "";
+  return splitMessage(text, DISCORD_MAX_TEXT - mention.length).map((chunk, i) =>
+    i === 0 && mention !== ""
+      ? { content: `${mention}${chunk}`, allowedMentions: { parse: [], users: [o.ownerId!] } }
+      : { content: chunk, allowedMentions: { parse: [] } },
+  );
 }
 
 /** One post waiting for Discord, one line of `outbox.jsonl`. */

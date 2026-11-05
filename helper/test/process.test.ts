@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { DEFAULT_COMMAND_TIMEOUT_MS, createProcessRunner, realProcessRunner } from "../src/process.ts";
 import { FakeProcessRunner } from "./fakes/fake-process.ts";
 
-// The real runner is exercised with the test runner's own executable and tiny inline scripts:
+// These tests run only the test runner's own executable with tiny inline scripts:
 // no `claude`, `security` or `launchctl` ever runs here.
 const bun = process.execPath;
 
