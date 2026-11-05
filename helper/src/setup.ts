@@ -90,7 +90,17 @@ function flag(args: readonly string[], name: string): string | null {
 async function setupToken(d: SetupDeps): Promise<number> {
   const token = (await d.readSecret("Paste the bot token (it stays hidden), then press Return: ")).trim();
   if (!isPlausibleToken(token)) {
-    d.err("That doesn't look like a bot token (three parts separated by dots). Nothing was saved.\n");
+    // Never show any of what was read, or its length: it may be most of a real token.
+    d.err(
+      [
+        "That doesn't look like a bot token (three parts separated by dots). Nothing was saved.",
+        "If pasting at the hidden prompt keeps failing, copy the token from the portal's Bot page (Reset Token shows a new one) and run this in your terminal instead:",
+        "  pbpaste | ~/.claude/session-kit/bin/sk-discord setup token",
+        "Then clear the clipboard so the token doesn't stay on it:",
+        "  pbcopy < /dev/null",
+        "",
+      ].join("\n"),
+    );
     return 1;
   }
   try {
