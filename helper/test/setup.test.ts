@@ -89,6 +89,19 @@ describe("setup token", () => {
     expect(r.err).toContain("pbpaste |");
   });
 
+  test("Ctrl-C at the prompt ends quietly, saving nothing", async () => {
+    const h = await harness({
+      token: null,
+      readSecret: async () => {
+        throw new Error("Canceled.");
+      },
+    });
+    const r = await h.run(["setup", "token"]);
+    expect(r.code).toBe(1);
+    expect(r.err).toBe("Canceled. Nothing was saved.\n");
+    expect(h.keychain.token).toBeNull();
+  });
+
   test("a token Discord rejects is not saved", async () => {
     const h = await harness({ token: null });
     h.rest.failNext({ path: "/users/@me", status: 401, body: { message: "401: Unauthorized", code: 0 } });

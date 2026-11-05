@@ -88,7 +88,14 @@ function flag(args: readonly string[], name: string): string | null {
 
 /** `setup token`: read the bot token without showing it, check it with Discord, and keep it in the Keychain. */
 async function setupToken(d: SetupDeps): Promise<number> {
-  const token = (await d.readSecret("Paste the bot token (it stays hidden), then press Return: ")).trim();
+  let token: string;
+  try {
+    token = (await d.readSecret("Paste the bot token (it stays hidden), then press Return: ")).trim();
+  } catch (error) {
+    // Ctrl-C or Ctrl-D at the prompt, or stdin couldn't be read
+    d.err(`${(error as Error).message} Nothing was saved.\n`);
+    return 1;
+  }
   if (!isPlausibleToken(token)) {
     // Never show any of what was read, or its length: it may be most of a real token.
     d.err(
