@@ -1,0 +1,95 @@
+# session-kit
+
+session-kit is a Claude Code plugin that sets up every session the same way. When a session starts, it asks whether one agent should do the work or coordinate worker agents, and whether the session should run autonomously. It also loads your standing rules into every session and subagent, and keeps a short per-project brief that new sessions read first.
+
+## Install
+
+From GitHub, once the repository is published, run these in a Claude Code session:
+
+```text
+/plugin marketplace add ducky8x/session-kit
+/plugin install session-kit@session-kit
+```
+
+The install command opens the plugin's details in the `/plugin` panel, where you choose a scope and install. From your shell, `claude plugin marketplace add ducky8x/session-kit` and then `claude plugin install session-kit@session-kit` do the same.
+
+From a local clone, add the clone's folder as the marketplace. Run this from the folder that holds the clone, or give an absolute path. A relative path has to start with `./` or `../`, because Claude Code reads a bare `name/name` as a GitHub repository:
+
+```text
+/plugin marketplace add ./session-kit
+/plugin install session-kit@session-kit
+```
+
+A marketplace added from a local folder reads the plugin's files in place, so edits in the clone apply at the next session start or after `/reload-plugins`.
+
+The setup questions come from a SessionStart hook, so after you install they first appear in your next new session or after `/clear`.
+
+To try the plugin for one session without installing it, start Claude Code with `--plugin-dir`:
+
+```bash
+claude --plugin-dir ./session-kit
+```
+
+## What happens when a session starts
+
+1. The SessionStart hook gives Claude the session id, the path of the session's state file and your rules file, and asks it to run `/session-kit:start` before anything else.
+2. The start skill asks two questions in one dialog:
+   - **Workflow**: Single-agent (one agent does all the work) or Multi-agent (this agent plans, hands tasks to worker agents, reviews their results, and handles the repo and git).
+   - **Autonomous**: No (Claude asks when a decision is yours) or Yes (Claude decides, notes each assumption, and keeps going).
+
+   It skips what your first message already answers, and it doesn't ask in subagents or in print mode (`claude -p`). If you set `askUserQuestionTimeout` and nobody answers in time, it picks single-agent with autonomous mode on.
+3. It saves the answers in the session's state file and prints one line, such as `Workflow: multi-agent · Autonomous: ON`.
+4. If a `.agentcontext` file exists in the current folder or a parent folder, it runs `/session-kit:load-context`. Then it starts on your request.
+
+After a summary of the chat (compaction), a resume or a fork, the hook restates the saved setup instead of asking again. To change the setup mid-session, run `/session-kit:start` or say something like "switch to single-agent".
+
+## Skills
+
+| Command | What it does |
+| :- | :- |
+| `/session-kit:start` | Sets the session's workflow and autonomous mode. Runs by itself at session start; run it again to change the setup. It also creates your rules file from the template when you ask. |
+| `/session-kit:autonomous-mode` | Turns autonomous mode on or off. Followed by a task, it turns it on for that task only. While it's on, Claude decides instead of asking, still stops for irreversible steps, lists the decisions it made, and keeps a Mac awake. |
+| `/session-kit:load-context` | Reads every `.agentcontext` file in the current folder and its parents, plus the README each one points to. |
+| `/session-kit:create-context` | Writes a `.agentcontext` brief for the current project and keeps it out of git. |
+| `/session-kit:update-context` | Updates `.agentcontext` with what the session finished and what's left, and prunes stale lines. |
+
+Claude also runs these skills on its own when a request matches, such as "go autonomous" or "catch me up".
+
+Each skill also answers to its bare name, such as `/start`, as long as no other skill or command uses that name. Claude Code has no built-in `/start`. If you have a personal skill with the same name, the bare name runs yours, and the `/session-kit:` name runs the plugin's.
+
+## Your rules file
+
+Put your standing rules in `~/.claude/session-kit/rules.md`: how to address you, git conventions, writing style, things never to do. The hooks load the file into the session at startup, after `/clear`, after a summary of the chat and on resume, and into every subagent.
+
+Keep it under 8000 bytes. A file of up to 8000 bytes loads in full. A bigger one gets only a note telling Claude to read it, because Claude Code cuts hook output over 10,000 characters down to a short preview.
+
+To start one, ask Claude to create your session-kit rules file, and the start skill copies the template for you. Or copy it yourself from the root of a clone:
+
+```bash
+mkdir -p ~/.claude/session-kit
+cp -n skills/start/rules-template.md ~/.claude/session-kit/rules.md
+```
+
+The file is yours. The plugin never overwrites it: the start skill copies the template only when no rules file exists.
+
+## Where state lives
+
+Each session's setup is saved in `~/.claude/session-kit/state/<session id>.json`: the workflow, whether autonomous mode is on and for what scope, and the ids of its keep-awake command and heartbeat. That file lets the setup survive a summary of the chat. The session-start hook deletes state files older than 30 days.
+
+## Requirements
+
+- bash and standard tools (`sed`, `awk`, `find`, `tr`, `wc`). The hooks don't need python3 or jq. On Windows, the hooks need Git Bash.
+- Keep-awake in autonomous mode uses `caffeinate`, so it only works on macOS. On other systems autonomous mode runs without it and says so.
+
+## Running the tests
+
+```bash
+bash tests/test-hooks.sh
+```
+
+The tests run each hook with a temporary `HOME`, so they never touch your real `~/.claude`. They use python3 to check the JSON the subagent hook prints.
+
+## If you already have your own versions
+
+- **Skills with the same names** in `~/.claude/skills` (`start`, `autonomous-mode`, `load-context`, `create-context`, `update-context`): remove or rename them. Otherwise both copies load, Claude sees two skills for the same job, and the bare `/name` runs your copy.
+- **SessionStart or SubagentStart hooks** in `~/.claude/settings.json` that ask setup questions or inject a rules file: remove them. Plugin hooks run alongside the hooks in your settings, so you'd get both. Move your rules into `~/.claude/session-kit/rules.md`.
