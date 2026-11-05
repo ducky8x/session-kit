@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { type CallHelper, HelperError, NOT_RUNNING, callHelper } from "./client.ts";
 import { runDaemon } from "./run-daemon.ts";
 import { notificationHook } from "./hooks/notification.ts";
+import { postAskHook, preAskHook } from "./hooks/ask.ts";
 import { stopHook } from "./hooks/stop.ts";
 import { listenCommand } from "./listen.ts";
 import { sessionEndHook } from "./hooks/session-end.ts";
@@ -57,6 +58,8 @@ export const HOOKS: Record<string, Hook> = {
   "session-end": sessionEndHook,
   notification: notificationHook,
   stop: stopHook,
+  "pre-ask": preAskHook,
+  "post-ask": postAskHook,
 };
 
 /** How long `status` waits for the helper. */

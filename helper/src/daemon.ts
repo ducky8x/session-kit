@@ -441,6 +441,17 @@ export class Daemon {
   }
 
   /**
+   * Make sure the helper knows the session, registering it from what a command sends along (its entry point
+   * and folder) when Discord was turned on after it started. False: it is unknown and not interactive.
+   */
+  async adopt(sessionId: string, entrypoint: string | null, cwd: string | null): Promise<boolean> {
+    if (this.sessions.get(sessionId)) return true;
+    if (surfaceFor(entrypoint) === null) return false;
+    await this.channels.register({ sessionId, source: "resume", cwd: cwd ?? "", transcriptPath: null, entrypoint });
+    return true;
+  }
+
+  /**
    * A session posts in its channel. A session the helper does not know is registered first from what the
    * command sends along (its folder and entry point), so Discord turned on mid-session still works.
    */
@@ -449,18 +460,8 @@ export class Daemon {
     const sessionId = text(req.sessionId, "sessionId");
     const body = typeof req.text === "string" ? req.text : "";
     if (body.trim() === "") throw new RequestError("invalid", "There is nothing to send.");
-    if (!this.sessions.get(sessionId)) {
-      const entrypoint = optionalText(req.entrypoint);
-      if (surfaceFor(entrypoint) === null) {
-        throw new RequestError("not-linked", "This session has no Discord channel (only interactive sessions get one).");
-      }
-      await this.channels.register({
-        sessionId,
-        source: "resume",
-        cwd: optionalText(req.cwd) ?? "",
-        transcriptPath: null,
-        entrypoint,
-      });
+    if (!(await this.adopt(sessionId, optionalText(req.entrypoint), optionalText(req.cwd)))) {
+      throw new RequestError("not-linked", "This session has no Discord channel (only interactive sessions get one).");
     }
     const ping = req.ping === true;
     const done = req.done === true;

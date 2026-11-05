@@ -1,6 +1,7 @@
 import type { Daemon } from "./daemon.ts";
 import { Inbound } from "./inbound.ts";
 import { ListenerHub, stopHookReason } from "./listeners.ts";
+import { Questions } from "./questions.ts";
 import { RequestError } from "./server.ts";
 import { Waker } from "./wake.ts";
 
@@ -9,6 +10,7 @@ export interface SessionFeatures {
   hub: ListenerHub;
   waker: Waker;
   inbound: Inbound;
+  questions: Questions;
 }
 
 const built = new WeakMap<Daemon, SessionFeatures>();
@@ -26,8 +28,8 @@ function sessionIdOf(value: unknown): string {
 }
 
 /**
- * Listening, routing messages to sessions, waking closed terminal sessions and the Stop hook's hand-over.
- * Adds the `listen` and `stop-hook` ops.
+ * Listening, routing messages to sessions, waking closed terminal sessions, the Stop hook's hand-over and
+ * questions. Adds the `listen`, `stop-hook`, `ask` and `answer` ops.
  */
 export function installSessionFeatures(daemon: Daemon): SessionFeatures {
   const { deps } = daemon;
@@ -43,7 +45,8 @@ export function installSessionFeatures(daemon: Daemon): SessionFeatures {
     ...(deps.which ? { which: deps.which } : {}),
   });
   const inbound = new Inbound(daemon, hub, waker);
-  const features: SessionFeatures = { hub, waker, inbound };
+  const questions = new Questions(daemon, inbound);
+  const features: SessionFeatures = { hub, waker, inbound, questions };
   built.set(daemon, features);
 
   daemon.onInbound(inbound.handle);
@@ -77,5 +80,6 @@ export function installSessionFeatures(daemon: Daemon): SessionFeatures {
       const reason = stopHookReason(daemon.sessions.takeInbox(sessionId));
       return reason === null ? {} : { decision: "block", reason };
     });
+  questions.install();
   return features;
 }
