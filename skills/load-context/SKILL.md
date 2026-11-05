@@ -16,6 +16,7 @@ Brief yourself on the project in the current working directory so you can work r
    - What the project is and its current stage, in one line.
    - The most relevant current-status facts (in-flight work, active branches, running services, anything time-sensitive), mostly from the most specific context.
    - Conventions or gotchas only if they're likely to matter right away, noting when one comes from a parent directory's context rather than the current project's.
+   - If `.task/` in the current working directory holds specs whose status isn't `done` (see the `session-kit:brainstorm` skill), one line naming each with its status, such as `Open specs: csv-export (awaiting go-ahead), login-rate-limit (in progress)`. `grep -m1 -H 'Status:' .task/*.md` lists the statuses.
 6. How to finish depends on whether a request is waiting:
    - **Run on its own:** end by saying you're ready and asking what the user wants to work on. Don't invent a task.
    - **A request is already pending:** keep the brief to two or three lines, then go straight on to the request instead of asking what to work on. This is the case when the `start` skill (`/session-kit:start`) runs this skill at session start while the user's first request waits.
