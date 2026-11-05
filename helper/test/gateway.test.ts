@@ -121,9 +121,14 @@ describe("GatewayClient", () => {
     expect(kit.heartbeats()).toHaveLength(1);
     await kit.clock.advance(41_250);
     await waitFor(() => kit.fake.connections.length === 2 && kit.client.state === "connected");
-    expect(kit.heartbeats()).toHaveLength(1);
-    expect(kit.fake.connections[0]!.closed).toBe(true);
-    expect(kit.fake.connections[1]!.ops(6)).toHaveLength(1);
+    // Count heartbeats per connection. With jitter 0 the resumed connection's first heartbeat falls due at
+    // once, so the advance above also sends it when that connection's HELLO arrives while the advance is
+    // still running timers. Once the server has seen the old connection close, it has every frame sent on it.
+    const [first, second] = kit.fake.connections;
+    await waitFor(() => first!.closed);
+    expect(first!.closeCode).toBe(4000);
+    expect(first!.ops(1)).toHaveLength(1);
+    expect(second!.ops(6)).toHaveLength(1);
   });
 
   test("op 7 RECONNECT reconnects at once and resumes", async () => {
