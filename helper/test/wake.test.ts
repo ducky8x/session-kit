@@ -255,7 +255,7 @@ describe("waking from a Discord message", () => {
 
   test("two closed sessions are woken one after the other", async () => {
     const k = await inboundKit();
-    await k.register("bbbb2222", "cli");
+    await k.startChat("bbbb2222", "cli");
     k.claude.addClosed(k.sessionId);
     k.claude.addClosed("bbbb2222");
     await k.say("to the first");

@@ -79,10 +79,7 @@ export interface Timing {
   /** No messages for this long: the channel is deleted and the session forgotten. */
   deleteMs: number;
   renameSpacingMs: number;
-  /**
-   * How long `register` waits for a new channel before answering "being created". The session-start hook
-   * gives the whole call 2 seconds.
-   */
+  /** How long `register` waits for its work before answering. The session-start hook gives the call 2 seconds. */
   registerWaitMs: number;
 }
 
@@ -144,8 +141,10 @@ export interface RegisterResult {
   channelName: string | null;
   /** The category the channel is in (or will be in). */
   category: string | null;
-  /** The channel is still being created. */
+  /** The session has no channel yet, or it is still being created. */
   pending: boolean;
+  /** The session has a channel. */
+  linked: boolean;
 }
 
 export interface ChannelDeps {
@@ -175,7 +174,7 @@ function asChannel(raw: unknown): GuildChannel | null {
 }
 
 /**
- * Session channels: made when a session registers, named and renamed, kept in their surface's category (with
+ * Session channels: made once a session's chat starts, named and renamed, kept in their surface's category (with
  * overflow categories past 50), moved to Archive after a quiet week and deleted after a quiet month.
  *
  * Changes to the server's layout (create, move, delete) run one at a time, so two sessions starting together
@@ -191,6 +190,8 @@ export class ChannelManager {
   private readonly renaming = new Set<string>();
   private sweepTimer: TimerHandle | null = null;
   private sweepRun: Promise<void> | null = null;
+  /** Sessions whose chat got under way since they last started (see `activate`). */
+  private readonly active = new Set<string>();
   private stopped = false;
   private reconciled = false;
 
@@ -225,18 +226,6 @@ export class ChannelManager {
     while (this.inflight.size > 0) await Promise.allSettled([...this.inflight]);
   }
 
-  /** Wait for `promise`, but at most `ms`. True when it finished in time. */
-  private within(promise: Promise<unknown>, ms: number): Promise<boolean> {
-    return new Promise((resolve) => {
-      const timer = this.d.clock.setTimeout(() => resolve(false), ms);
-      const done = () => {
-        this.d.clock.clearTimeout(timer);
-        resolve(true);
-      };
-      promise.then(done, done);
-    });
-  }
-
   private childCount(categoryId: string): number {
     let n = 0;
     for (const c of this.cache.values()) if (c.parent_id === categoryId) n++;
@@ -268,16 +257,17 @@ export class ChannelManager {
     return id === null ? null : (this.cache.get(id)?.name ?? null);
   }
 
-  /** Where a session's channel is, for replies and `status`. */
-  describe(sessionId: string, pending = false): RegisterResult {
+  /** Where a session's channel is (or will be), for replies and `status`. */
+  describe(sessionId: string): RegisterResult {
     const entry = this.d.sessions.get(sessionId);
-    if (!entry) return { registered: false, channelName: null, category: null, pending: false };
+    if (!entry) return { registered: false, channelName: null, category: null, pending: false, linked: false };
     const parent = entry.channelId === null ? null : (this.cache.get(entry.channelId)?.parent_id ?? null);
     return {
       registered: true,
       channelName: entry.channelName ?? this.wantedName(entry),
       category: this.categoryName(parent) ?? SURFACE_INFO[entry.surface].category,
-      pending: pending || entry.channelId === null,
+      pending: entry.channelId === null,
+      linked: entry.channelId !== null,
     };
   }
 
@@ -382,14 +372,16 @@ export class ChannelManager {
   // ---- sessions --------------------------------------------------------------------
 
   /**
-   * A session started (SessionStart). A new session id gets a new channel; `resume` reuses the channel (out of
-   * Archive if it was there); `compact` changes nothing. Non-interactive entry points get nothing.
+   * A session started (SessionStart). It is recorded, but its channel waits until its chat starts (see
+   * `activate`), so a session that never gets a prompt never gets a channel. `resume` keeps the channel it
+   * had; `compact` changes nothing. Non-interactive entry points get nothing.
    */
   async register(input: RegisterInput): Promise<RegisterResult> {
     const surface = surfaceFor(input.entrypoint);
-    if (!surface) return { registered: false, channelName: null, category: null, pending: false };
+    if (!surface) return { registered: false, channelName: null, category: null, pending: false, linked: false };
     const known = this.d.sessions.get(input.sessionId);
     if (known && input.source === "compact") return this.describe(input.sessionId);
+    this.active.delete(input.sessionId);
     if (!known) {
       this.d.sessions.put(
         newSession({
@@ -405,17 +397,30 @@ export class ChannelManager {
       e.closedAt = null;
       if (input.cwd !== "") e.cwd = input.cwd;
       if (input.transcriptPath !== null) e.transcriptPath = input.transcriptPath;
-      if (e.channelId === null || e.archived) e.wantsChannel = true;
     });
-    const entry = this.d.sessions.get(input.sessionId)!;
-    if (!entry.wantsChannel) return this.describe(input.sessionId);
-    if (!this.d.isOnline()) return this.describe(input.sessionId, true);
-    const work = this.ensureChannel(input.sessionId).catch((error) => {
-      this.d.log.warn(`could not make a channel for session ${input.sessionId.slice(0, 8)}: ${(error as Error).message}`);
-      return null;
+    return this.describe(input.sessionId);
+  }
+
+  /**
+   * The session's chat is under way: the user typed a prompt, or a turn ended. The first time after each
+   * start, the session gets its channel, or has it moved out of Archive. Later calls change nothing, so a
+   * channel deleted by hand stays deleted until the session posts. Unknown sessions are left to their first
+   * post, which registers them.
+   */
+  activate(sessionId: string): void {
+    const entry = this.d.sessions.get(sessionId);
+    if (!entry || this.active.has(sessionId)) return;
+    this.active.add(sessionId);
+    if (entry.channelId !== null && !entry.archived) return;
+    if (!this.d.isOnline()) {
+      this.d.sessions.update(sessionId, (e) => {
+        e.wantsChannel = true;
+      });
+      return;
+    }
+    void this.ensureChannel(sessionId).catch((error) => {
+      this.d.log.warn(`could not make a channel for session ${sessionId.slice(0, 8)}: ${(error as Error).message}`);
     });
-    const finished = await this.within(work, this.timing.registerWaitMs);
-    return this.describe(input.sessionId, !finished);
   }
 
   /** The session ended (SessionEnd). The channel stays until the sweep. */

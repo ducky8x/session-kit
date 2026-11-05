@@ -122,8 +122,18 @@ describe("delivery", () => {
     await k.attached();
     k.gateway.dispatch("CHANNEL_DELETE", { id: k.channelId(), guild_id: GUILD_ID, type: 0 });
     expect(await event).toEqual({ type: "unlinked" });
-    expect(await k.listen()).toEqual({ type: "unlinked" });
     expect(await k.listen("never-registered")).toEqual({ type: "unlinked" });
+  });
+
+  test("a session listens before its chat starts, and hears the first message once it has a channel", async () => {
+    const k = await inboundKit();
+    await k.register("dddd4444");
+    const event = k.listen("dddd4444");
+    await k.attached("dddd4444");
+    await k.call({ op: "stop-hook", sessionId: "dddd4444" });
+    await waitFor(() => k.daemon.sessions.get("dddd4444")?.channelId != null);
+    await k.say("hello there", { channelId: k.daemon.sessions.get("dddd4444")!.channelId! });
+    expect(await event).toMatchObject({ type: "text", text: "hello there" });
   });
 
   test("a full inbox drops the oldest and the reply says so", async () => {

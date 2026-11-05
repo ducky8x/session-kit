@@ -10,6 +10,7 @@ async function withSession() {
   const k = await channelKit();
   await k.channels.reconcile();
   await k.channels.register({ sessionId: SID, source: "startup", cwd: "/work/session-kit", transcriptPath: null, entrypoint: "cli" });
+  await k.channels.ensureChannel(SID);
   const channelId = k.sessions.get(SID)!.channelId!;
   return { ...k, channelId };
 }

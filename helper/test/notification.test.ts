@@ -11,7 +11,7 @@ describe("hook notification", () => {
   test("permission_prompt and elicitation_dialog post with a ping", async () => {
     const k = await daemonKit();
     await k.connected();
-    await k.register(SID);
+    await k.startChat(SID);
     const channelId = k.daemon.sessions.get(SID)!.channelId!;
     for (const [type, message] of [
       ["permission_prompt", "Claude needs your permission to use Bash"],

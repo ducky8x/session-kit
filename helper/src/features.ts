@@ -61,8 +61,8 @@ export function installSessionFeatures(daemon: Daemon): SessionFeatures {
     .add("listen", (req, ctx) => {
       const sessionId = sessionIdOf(req.sessionId);
       if (!daemon.currentConfig().enabled) return { event: { type: "disabled" } };
-      const entry = daemon.sessions.get(sessionId);
-      if (!entry || (entry.channelId === null && !entry.wantsChannel)) return { event: { type: "unlinked" } };
+      // A session listens from the start, before its chat (and so its channel) gets under way.
+      if (!daemon.sessions.get(sessionId)) return { event: { type: "unlinked" } };
       const waiting = daemon.sessions.shiftInbox(sessionId);
       if (waiting) return { event: { ...waiting, queued: true } };
       return new Promise((resolve) => {
@@ -76,7 +76,10 @@ export function installSessionFeatures(daemon: Daemon): SessionFeatures {
     })
     .add("stop-hook", (req) => {
       const sessionId = sessionIdOf(req.sessionId);
-      if (!daemon.currentConfig().enabled || hub.isListening(sessionId)) return {};
+      if (!daemon.currentConfig().enabled) return {};
+      // A turn ended, so the session's chat is under way: it gets its channel now if it has none.
+      daemon.channels.activate(sessionId);
+      if (hub.isListening(sessionId)) return {};
       const reason = stopHookReason(daemon.sessions.takeInbox(sessionId));
       return reason === null ? {} : { decision: "block", reason };
     });

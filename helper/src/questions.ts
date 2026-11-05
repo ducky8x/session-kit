@@ -325,6 +325,8 @@ export class Questions {
       // a dialog closed with Esc or "clarify", where Claude Code denies the tool and PostToolUse never runs.
       .add("present", (req) => {
         const sessionId = typeof req.sessionId === "string" ? req.sessionId : "";
+        // A prompt also means the session's chat is under way, so it gets its channel if it has none.
+        if (this.daemon.currentConfig().enabled) this.daemon.channels.activate(sessionId);
         return { closed: this.answeredAtKeyboard(sessionId, null) };
       });
     this.resumeAll();

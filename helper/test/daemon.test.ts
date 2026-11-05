@@ -113,7 +113,7 @@ describe("daemon start and status", () => {
 });
 
 describe("daemon sessions", () => {
-  test("register over the socket makes the channel and answers with it", async () => {
+  test("register answers with the channel to come and makes nothing on Discord", async () => {
     const k = await daemonKit();
     await k.connected();
     const reply = await k.register(SID, "claude-desktop");
@@ -122,11 +122,31 @@ describe("daemon sessions", () => {
       registered: true,
       channelName: "session-kit-caa2-desktop",
       category: "Desktop",
-      pending: false,
+      pending: true,
+      linked: false,
       status: "connected",
       notice: false,
     });
-    expect(k.rest.channelNamed("session-kit-caa2-desktop")?.parent_id).toBe(k.categories.desktop.id);
+    await k.daemon.settle();
+    expect(k.rest.requests.filter((r) => r.method !== "GET")).toHaveLength(0);
+  });
+
+  test("the end of the session's first turn makes its channel", async () => {
+    const k = await daemonKit();
+    await k.connected();
+    await k.register(SID, "claude-desktop");
+    expect(await k.call({ op: "stop-hook", sessionId: SID })).toEqual({ ok: true });
+    await waitFor(() => k.rest.channelNamed("session-kit-caa2-desktop") !== undefined);
+    expect(k.rest.channelNamed("session-kit-caa2-desktop")!.parent_id).toBe(k.categories.desktop.id);
+    expect(await k.register(SID, "claude-desktop", "resume")).toMatchObject({ pending: false, linked: true });
+  });
+
+  test("a prompt the user typed makes the channel", async () => {
+    const k = await daemonKit();
+    await k.connected();
+    await k.register(SID);
+    await k.call({ op: "present", sessionId: SID });
+    await waitFor(() => k.rest.channelNamed("session-kit-caa2-cli") !== undefined);
   });
 
   test("a session that is not interactive is not registered", async () => {
@@ -146,11 +166,12 @@ describe("daemon sessions", () => {
     expect(k.rest.requests.length).toBe(before);
   });
 
-  test("a session registered while offline gets its channel when the gateway connects", async () => {
+  test("a chat that starts while offline gets its channel when the gateway connects", async () => {
     const k = await daemonKit({ noStart: true });
     k.gateway.autoHello = false;
     await k.daemon.start();
     expect(await k.register(SID)).toMatchObject({ pending: true, status: "connecting" });
+    await k.call({ op: "stop-hook", sessionId: SID });
     await waitFor(() => k.gateway.connections.length === 1);
     k.gateway.hello();
     await waitFor(() => k.rest.channelNamed("session-kit-caa2-cli") !== undefined);
@@ -159,7 +180,7 @@ describe("daemon sessions", () => {
   test("CHANNEL_DELETE for a session's channel unlinks the session", async () => {
     const k = await daemonKit();
     await k.connected();
-    await k.register(SID);
+    await k.startChat(SID);
     const channelId = k.daemon.sessions.get(SID)!.channelId!;
     k.rest.channels.delete(channelId);
     k.gateway.dispatch("CHANNEL_DELETE", { id: channelId, guild_id: GUILD_ID, type: 0 });
@@ -169,8 +190,8 @@ describe("daemon sessions", () => {
   test("a restart reloads sessions and the outbox, and unlinks sessions whose channel went away", async () => {
     const first = await daemonKit();
     await first.connected();
-    await first.register(SID);
-    await first.register("bbbb0000");
+    await first.startChat(SID);
+    await first.startChat("bbbb0000");
     const gone = first.daemon.sessions.get("bbbb0000")!.channelId!;
     await first.daemon.stop();
     first.rest.channels.delete(gone);
@@ -202,7 +223,7 @@ describe("daemon sessions", () => {
         : undefined,
     );
     await k.connected();
-    await k.register(SID);
+    await k.startChat(SID);
     await k.clock.advance(0); // the first poll
     await k.daemon.settle();
     await waitFor(() => k.rest.channelNamed("fix-login-bug-cli") !== undefined);
@@ -214,7 +235,7 @@ describe("daemon inbound seam", () => {
   test("every message in the server reaches the handlers in order, with its session", async () => {
     const k = await daemonKit();
     await k.connected();
-    await k.register(SID);
+    await k.startChat(SID);
     const channelId = k.daemon.sessions.get(SID)!.channelId!;
     const seen: [string | undefined, string | null][] = [];
     k.daemon.onInbound((message, session) => void seen.push([message.content, session?.sessionId ?? null]));
@@ -234,7 +255,7 @@ describe("daemon inbound seam", () => {
   test("an owner message in an archived channel moves it back before the handlers see it", async () => {
     const k = await daemonKit();
     await k.connected();
-    await k.register(SID);
+    await k.startChat(SID);
     const channelId = k.daemon.sessions.get(SID)!.channelId!;
     k.daemon.sessions.update(SID, (e) => {
       e.lastMessageAt -= 8 * DAY_MS;
@@ -254,7 +275,7 @@ describe("daemon inbound seam", () => {
   test("a post updates the channel's last message time", async () => {
     const k = await daemonKit();
     await k.connected();
-    await k.register(SID);
+    await k.startChat(SID);
     await k.clock.advance(5000);
     k.daemon.post(SID, "progress");
     await k.daemon.settle();
@@ -264,7 +285,7 @@ describe("daemon inbound seam", () => {
   test("a tagged post reports its message id once it is out", async () => {
     const k = await daemonKit();
     await k.connected();
-    await k.register(SID);
+    await k.startChat(SID);
     const posted: { tag: string | null; messageId: string }[] = [];
     k.daemon.onPosted((e) => posted.push({ tag: e.tag, messageId: e.messageId }));
     k.daemon.post(SID, "question 1", { tag: "q-1", ping: true });

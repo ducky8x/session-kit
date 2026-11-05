@@ -114,6 +114,14 @@ export async function daemonKit(o: DaemonKitOptions = {}) {
     return { code, out: out.join(""), err: err.join("") };
   };
 
+  /** SessionStart, as the session-start hook sends it. */
+  const register = (sessionId: string, entrypoint = "cli", source = "startup") =>
+    callHelper(
+      paths.socket,
+      { op: "register", sessionId, source, cwd: "/work/session-kit", transcriptPath: null, entrypoint },
+      { timeoutMs: 3000 },
+    );
+
   return {
     rest,
     gateway,
@@ -130,12 +138,14 @@ export async function daemonKit(o: DaemonKitOptions = {}) {
     call: (request: HelperRequest) => callHelper(paths.socket, request, { timeoutMs: 3000 }),
     connected: () => waitFor(() => daemon.statusCode() === "connected"),
     setConfig: (mutate: (c: Config) => void) => updateConfig(paths, mutate),
-    register: (sessionId: string, entrypoint = "cli", source = "startup") =>
-      callHelper(
-        paths.socket,
-        { op: "register", sessionId, source, cwd: "/work/session-kit", transcriptPath: null, entrypoint },
-        { timeoutMs: 3000 },
-      ),
+    register,
+    /** SessionStart, then the end of the first turn (the Stop hook): the session's chat is under way. */
+    startChat: async (sessionId: string, entrypoint = "cli", source = "startup") => {
+      const reply = await register(sessionId, entrypoint, source);
+      await callHelper(paths.socket, { op: "stop-hook", sessionId }, { timeoutMs: 3000 });
+      await waitFor(() => daemon.sessions.get(sessionId)?.channelId != null);
+      return reply;
+    },
   };
 }
 

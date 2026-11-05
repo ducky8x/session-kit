@@ -80,7 +80,7 @@ export const INBOX_LIMIT = 50;
 /** One session the helper knows, keyed by its session id in `sessions.json`. */
 export interface SessionEntry {
   sessionId: string;
-  /** The session's channel. Null while it has none: not created yet, or deleted (unlinked). */
+  /** The session's channel. Null while it has none: its chat hasn't started yet, or it was deleted (unlinked). */
   channelId: string | null;
   /** The session's name as last seen. Null, empty or "New session" means it has none yet. */
   name: string | null;
@@ -102,7 +102,7 @@ export interface SessionEntry {
   question: Record<string, unknown> | null;
   /** When the channel was last renamed, for the 5-minute rename spacing. */
   renamedAt: number | null;
-  /** The channel should be made as soon as Discord is reachable (registered while offline). */
+  /** The channel should be made as soon as Discord is reachable (the chat started while offline). */
   wantsChannel: boolean;
   /** When the session's run was marked finished (`send --done`), which stops check-ins. */
   doneAt: number | null;

@@ -21,7 +21,7 @@ export async function inboundKit(o: { entrypoint?: string; sessionId?: string } 
   });
   await k.connected();
   const sessionId = o.sessionId ?? SID;
-  await k.register(sessionId, o.entrypoint ?? "cli");
+  await k.startChat(sessionId, o.entrypoint ?? "cli");
   const channelId = () => k.daemon.sessions.get(sessionId)!.channelId!;
 
   /** Everything the daemon started is done. */

@@ -1,20 +1,38 @@
 import { describe, expect, test } from "bun:test";
 import { RENAME_SPACING_MS, SERVER_SOFT_LIMIT } from "../src/channels.ts";
 import { GUILD_ID } from "./fakes/fake-rest.ts";
-import { SID, channelKit } from "./helpers/channel-kit.ts";
+import { type ChannelKit, SID, channelKit } from "./helpers/channel-kit.ts";
 
 const MINUTE = 60_000;
+const DAY = 24 * 60 * MINUTE;
 
 function startup(sessionId = SID, entrypoint = "claude-desktop", source = "startup", cwd = "/work/session-kit") {
   return { sessionId, source, cwd, transcriptPath: null, entrypoint };
 }
 
+/** A session that started and whose chat got under way (its first prompt, or its first turn ended). */
+async function open(k: ChannelKit, input: ReturnType<typeof startup>) {
+  await k.channels.register(input);
+  await k.channels.ensureChannel(input.sessionId);
+  return k.channels.describe(input.sessionId);
+}
+
 describe("registering sessions", () => {
-  test("startup creates one channel in its surface's category, with the topic", async () => {
+  test("startup records the session but makes no channel", async () => {
     const k = await channelKit();
     await k.channels.reconcile();
     const result = await k.channels.register(startup());
-    expect(result).toEqual({ registered: true, channelName: "session-kit-caa2-desktop", category: "Desktop", pending: false });
+    expect(result).toEqual({ registered: true, channelName: "session-kit-caa2-desktop", category: "Desktop", pending: true, linked: false });
+    expect(k.writes()).toHaveLength(0);
+    expect(k.sessions.get(SID)).toMatchObject({ surface: "desktop", cwd: "/work/session-kit", channelId: null });
+  });
+
+  test("the chat starting makes one channel in its surface's category, with the topic", async () => {
+    const k = await channelKit();
+    await k.channels.reconcile();
+    await k.channels.register(startup());
+    k.channels.activate(SID);
+    await k.channels.settle();
     const posts = k.fake.requestsMatching("POST", `/guilds/${GUILD_ID}/channels`);
     expect(posts).toHaveLength(1);
     expect(posts[0]!.body).toEqual({
@@ -26,44 +44,82 @@ describe("registering sessions", () => {
     const entry = k.sessions.get(SID)!;
     expect(entry).toMatchObject({ surface: "desktop", cwd: "/work/session-kit", channelName: "session-kit-caa2-desktop" });
     expect(k.fake.channels.get(entry.channelId!)?.parent_id).toBe(k.categories.desktop.id);
+    expect(k.channels.describe(SID)).toEqual({
+      registered: true,
+      channelName: "session-kit-caa2-desktop",
+      category: "Desktop",
+      pending: false,
+      linked: true,
+    });
+    // Later prompts and turns change nothing.
+    k.channels.activate(SID);
+    await k.channels.settle();
+    expect(k.fake.requestsMatching("POST", `/guilds/${GUILD_ID}/channels`)).toHaveLength(1);
+  });
+
+  test("a session that never starts a chat never gets a channel", async () => {
+    const k = await channelKit();
+    await k.channels.reconcile();
+    await k.channels.register(startup("ecbc0000", "cli"));
+    k.channels.ended("ecbc0000");
+    await k.channels.settle();
+    expect(k.writes()).toHaveLength(0);
+    await k.clock.advance(31 * DAY);
+    await k.channels.sweep();
+    expect(k.sessions.get("ecbc0000")).toBeUndefined();
+    expect(k.writes()).toHaveLength(0);
+  });
+
+  test("activating a session the helper doesn't know does nothing", async () => {
+    const k = await channelKit();
+    await k.channels.reconcile();
+    k.channels.activate("never-registered");
+    await k.channels.settle();
+    expect(k.writes()).toHaveLength(0);
+    expect(k.sessions.ids()).toEqual([]);
   });
 
   test("each surface goes to its own category", async () => {
     const k = await channelKit();
     await k.channels.reconcile();
-    expect((await k.channels.register(startup("aaaa0000", "claude-vscode"))).category).toBe("VS Code");
-    expect((await k.channels.register(startup("bbbb0000", "cli"))).category).toBe("CLI");
+    expect((await open(k, startup("aaaa0000", "claude-vscode"))).category).toBe("VS Code");
+    expect((await open(k, startup("bbbb0000", "cli"))).category).toBe("CLI");
     expect(k.fake.channelNamed("session-kit-aaaa-vs")?.parent_id).toBe(k.categories.vs.id);
     expect(k.fake.channelNamed("session-kit-bbbb-cli")?.parent_id).toBe(k.categories.cli.id);
   });
 
-  test("resume reuses the channel, and brings it out of Archive", async () => {
+  test("resume reuses the channel, and the resumed chat brings it out of Archive", async () => {
     const k = await channelKit();
     await k.channels.reconcile();
-    await k.channels.register(startup());
+    await open(k, startup());
     const channelId = k.sessions.get(SID)!.channelId!;
     k.channels.ended(SID);
     expect(k.sessions.get(SID)!.closedAt).not.toBeNull();
     const again = await k.channels.register(startup(SID, "claude-desktop", "resume"));
-    expect(again).toMatchObject({ channelName: "session-kit-caa2-desktop", pending: false });
-    expect(k.fake.requestsMatching("POST", `/guilds/${GUILD_ID}/channels`)).toHaveLength(1);
+    expect(again).toMatchObject({ channelName: "session-kit-caa2-desktop", pending: false, linked: true });
     expect(k.sessions.get(SID)!.closedAt).toBeNull();
+    k.channels.activate(SID);
+    await k.channels.settle();
+    expect(k.fake.requestsMatching("POST", `/guilds/${GUILD_ID}/channels`)).toHaveLength(1);
 
     k.fake.channels.get(channelId)!.parent_id = k.categories.archive.id;
     k.sessions.update(SID, (e) => {
       e.archived = true;
     });
     await k.channels.register(startup(SID, "claude-desktop", "resume"));
+    expect(k.fake.channels.get(channelId)!.parent_id).toBe(k.categories.archive.id);
+    k.channels.activate(SID);
+    await k.channels.settle();
     expect(k.fake.channels.get(channelId)!.parent_id).toBe(k.categories.desktop.id);
     expect(k.sessions.get(SID)!.archived).toBe(false);
   });
 
-  test("clear and fork come with new session ids and get new channels", async () => {
+  test("new session ids with nothing linking them to another chat get channels of their own", async () => {
     const k = await channelKit();
     await k.channels.reconcile();
-    await k.channels.register(startup());
-    await k.channels.register(startup("dddd1111", "claude-desktop", "clear"));
-    await k.channels.register(startup("eeee2222", "claude-desktop", "fork"));
+    await open(k, startup());
+    await open(k, startup("dddd1111", "claude-desktop", "clear"));
+    await open(k, startup("eeee2222", "claude-desktop", "fork"));
     expect(k.fake.requestsMatching("POST", `/guilds/${GUILD_ID}/channels`)).toHaveLength(3);
     expect(k.sessions.ids().sort()).toEqual([SID, "dddd1111", "eeee2222"].sort());
   });
@@ -71,10 +127,10 @@ describe("registering sessions", () => {
   test("compact changes nothing for a known session", async () => {
     const k = await channelKit();
     await k.channels.reconcile();
-    await k.channels.register(startup());
+    await open(k, startup());
     const before = k.fake.requests.length;
     const result = await k.channels.register(startup(SID, "claude-desktop", "compact"));
-    expect(result).toMatchObject({ registered: true, channelName: "session-kit-caa2-desktop", pending: false });
+    expect(result).toMatchObject({ registered: true, channelName: "session-kit-caa2-desktop", pending: false, linked: true });
     expect(k.fake.requests.length).toBe(before);
   });
 
@@ -83,16 +139,18 @@ describe("registering sessions", () => {
     await k.channels.reconcile();
     for (const entrypoint of ["sdk-cli", "local-agent", "remote", undefined]) {
       const result = await k.channels.register({ ...startup(), entrypoint });
-      expect(result).toEqual({ registered: false, channelName: null, category: null, pending: false });
+      expect(result).toEqual({ registered: false, channelName: null, category: null, pending: false, linked: false });
     }
     expect(k.writes()).toHaveLength(0);
     expect(k.sessions.ids()).toEqual([]);
   });
 
-  test("offline, the session is recorded and its channel is made once connected", async () => {
+  test("offline, a chat that starts gets its channel once connected", async () => {
     const k = await channelKit({ online: false });
     const result = await k.channels.register(startup());
-    expect(result).toEqual({ registered: true, channelName: "session-kit-caa2-desktop", category: "Desktop", pending: true });
+    expect(result).toEqual({ registered: true, channelName: "session-kit-caa2-desktop", category: "Desktop", pending: true, linked: false });
+    expect(k.sessions.get(SID)!.wantsChannel).toBe(false);
+    k.channels.activate(SID);
     expect(k.writes()).toHaveLength(0);
     expect(k.sessions.get(SID)!.wantsChannel).toBe(true);
     k.state.online = true;
@@ -104,8 +162,8 @@ describe("registering sessions", () => {
   test("a second session with the same name gets four id characters before the suffix", async () => {
     const k = await channelKit();
     await k.channels.reconcile();
-    await k.channels.register(startup("1111aaaa"));
-    await k.channels.register(startup("a91c2222"));
+    await open(k, startup("1111aaaa"));
+    await open(k, startup("a91c2222"));
     k.channels.applyNames(new Map([["1111aaaa", "Fix login bug"]]));
     await k.channels.settle();
     k.channels.applyNames(new Map([["a91c2222", "Fix login bug"]]));
@@ -114,14 +172,18 @@ describe("registering sessions", () => {
     expect(k.sessions.get("a91c2222")!.channelName).toBe("fix-login-bug-a91c-desktop");
   });
 
-  test("a channel deleted by hand unlinks its session; the next post makes a new channel", async () => {
+  test("a channel deleted by hand unlinks its session; later turns leave it, the next post makes a new one", async () => {
     const k = await channelKit();
     await k.channels.reconcile();
-    await k.channels.register(startup());
+    await open(k, startup());
+    k.channels.activate(SID);
     const old = k.sessions.get(SID)!.channelId!;
     k.fake.channels.delete(old);
     k.channels.onChannelEvent("CHANNEL_DELETE", { id: old, guild_id: GUILD_ID, type: 0 });
     expect(k.sessions.get(SID)!.channelId).toBeNull();
+    k.channels.activate(SID);
+    await k.channels.settle();
+    expect(k.fake.requestsMatching("POST", `/guilds/${GUILD_ID}/channels`)).toHaveLength(1);
     const fresh = await k.channels.ensureChannel(SID);
     expect(fresh).not.toBe(old);
     expect(k.fake.channels.get(fresh!)?.name).toBe("session-kit-caa2-desktop");
@@ -130,7 +192,7 @@ describe("registering sessions", () => {
   test("restart reconciliation unlinks a session whose channel is gone", async () => {
     const k = await channelKit();
     await k.channels.reconcile();
-    await k.channels.register(startup());
+    await open(k, startup());
     k.fake.channels.delete(k.sessions.get(SID)!.channelId!);
     await k.channels.reconcile();
     expect(k.sessions.get(SID)).toMatchObject({ channelId: null, channelName: null });
@@ -141,7 +203,7 @@ describe("registering sessions", () => {
     k.fake.channels.delete(k.categories.cli.id);
     await k.channels.reconcile();
     expect(k.config().categories.cli).toBeUndefined();
-    await k.channels.register(startup("bbbb0000", "cli"));
+    await open(k, startup("bbbb0000", "cli"));
     const made = k.fake.channelNamed("CLI");
     expect(made?.type).toBe(4);
     expect(k.config().categories.cli).toBe(made!.id);
@@ -153,7 +215,7 @@ describe("renames", () => {
   test("a name change at minute 1 renames at once; one at minute 3 waits until minute 6, with the latest name", async () => {
     const k = await channelKit();
     await k.channels.reconcile();
-    await k.channels.register(startup());
+    await open(k, startup());
     const channelId = k.sessions.get(SID)!.channelId!;
     const renames = () => k.fake.requestsMatching("PATCH", `/channels/${channelId}`).map((r) => r.body.name);
     expect(RENAME_SPACING_MS).toBe(5 * MINUTE);
@@ -180,7 +242,7 @@ describe("renames", () => {
   test('"New session" keeps the folder name; an unchanged name sends nothing', async () => {
     const k = await channelKit();
     await k.channels.reconcile();
-    await k.channels.register(startup());
+    await open(k, startup());
     k.channels.applyNames(new Map([[SID, "New session"]]));
     await k.channels.settle();
     expect(k.fake.requestsMatching("PATCH", /\/channels\//)).toHaveLength(0);
@@ -189,7 +251,7 @@ describe("renames", () => {
   test("a 429 on a rename waits retry_after and sends only the latest wanted name", async () => {
     const k = await channelKit();
     await k.channels.reconcile();
-    await k.channels.register(startup());
+    await open(k, startup());
     const channelId = k.sessions.get(SID)!.channelId!;
     k.fake.failNext({ method: "PATCH", path: `/channels/${channelId}`, status: 429, body: { retry_after: 90 } });
     k.channels.applyNames(new Map([[SID, "Old wish"]]));
@@ -211,14 +273,14 @@ describe("categories and the server limit", () => {
     const k = await channelKit();
     for (let i = 0; i < 50; i++) k.fake.addChannel({ name: `filler-${i}`, parent_id: k.categories.desktop.id });
     await k.channels.reconcile();
-    const result = await k.channels.register(startup());
+    const result = await open(k, startup());
     expect(result.category).toBe("Desktop 2");
     const overflow = k.fake.channelNamed("Desktop 2")!;
     expect(overflow.type).toBe(4);
     expect(k.config().categories["desktop-2"]).toBe(overflow.id);
     expect(k.fake.channelNamed("session-kit-caa2-desktop")?.parent_id).toBe(overflow.id);
     // A second new session also fits in Desktop 2: no third category.
-    await k.channels.register(startup("bbbb0000"));
+    await open(k, startup("bbbb0000"));
     expect(k.fake.requestsMatching("POST", `/guilds/${GUILD_ID}/channels`).filter((r) => r.body.type === 4)).toHaveLength(1);
   });
 
@@ -226,8 +288,8 @@ describe("categories and the server limit", () => {
     const k = await channelKit();
     expect(SERVER_SOFT_LIMIT).toBe(490);
     await k.channels.reconcile();
-    await k.channels.register(startup("old10000"));
-    await k.channels.register(startup("old20000"));
+    await open(k, startup("old10000"));
+    await open(k, startup("old20000"));
     const oldest = k.sessions.get("old10000")!.channelId!;
     const newer = k.sessions.get("old20000")!.channelId!;
     for (const [id, channelId, at] of [
@@ -245,7 +307,7 @@ describe("categories and the server limit", () => {
     while (k.fake.channels.size < 490) k.fake.addChannel({ name: `filler-${n++}` });
     await k.channels.reconcile();
     const before = k.fake.requests.length;
-    await k.channels.register(startup());
+    await open(k, startup());
     const after = k.fake.requests.slice(before).filter((r) => r.method !== "GET");
     expect(after.map((r) => `${r.method} ${r.path}`)).toEqual([`DELETE /channels/${oldest}`, `POST /guilds/${GUILD_ID}/channels`]);
     expect(k.sessions.get("old10000")).toBeUndefined();
