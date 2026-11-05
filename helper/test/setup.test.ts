@@ -17,7 +17,9 @@ afterEach(() => {
   for (const f of fakes.splice(0)) f.stop();
 });
 
-async function harness(o: { token?: string | null; stdin?: string; withRest?: boolean } = {}) {
+async function harness(
+  o: { token?: string | null; stdin?: string; withRest?: boolean; readSecret?: CliDeps["readSecret"] } = {},
+) {
   const home = tmpDir();
   const paths = pathsFor(home);
   const keychain = new MemoryKeychain(o.token === undefined ? TOKEN : o.token);
@@ -39,6 +41,7 @@ async function harness(o: { token?: string | null; stdin?: string; withRest?: bo
     restBaseUrl: rest.baseUrl,
     uid: 501,
     which: (command) => (command === "claude" ? "/opt/tools/claude" : null),
+    ...(o.readSecret ? { readSecret: o.readSecret } : {}),
   };
   const run = async (argv: string[], input?: string) => {
     if (input !== undefined) stdin = input;
@@ -60,12 +63,43 @@ describe("setup token", () => {
     expect(r.out).toContain("Saved the bot token in the Keychain.");
   });
 
-  test("refuses something that is not a token, and saves nothing", async () => {
+  test("refuses something that is not a token, saves nothing, and says how to pipe it in instead", async () => {
     const h = await harness({ token: null });
     const r = await h.run(["setup", "token"], "not a token\n");
     expect(r.code).toBe(1);
     expect(h.keychain.token).toBeNull();
     expect(r.err).not.toContain("not a token");
+    expect(r.err).toContain("Nothing was saved.");
+    expect(r.err).toContain("\n  pbpaste | ~/.claude/session-kit/bin/sk-discord setup token\n");
+    expect(r.err).toContain("\n  pbcopy < /dev/null\n");
+    expect(r.out).toBe("");
+  });
+
+  test("a token the hidden prompt got wrong is refused without printing any of it or its length", async () => {
+    const mangled = `\u001b[200~${TOKEN}\u001b[201~`;
+    const h = await harness({ token: null, readSecret: async () => mangled });
+    const r = await h.run(["setup", "token"]);
+    expect(r.code).toBe(1);
+    expect(h.keychain.token).toBeNull();
+    const shown = `${r.out}${r.err}`;
+    for (let at = 0; at + 6 <= TOKEN.length; at++) expect(shown).not.toContain(TOKEN.slice(at, at + 6));
+    expect(shown).not.toContain("200~");
+    // No digits at all, so no length either.
+    expect(shown).not.toMatch(/\d/);
+    expect(r.err).toContain("pbpaste |");
+  });
+
+  test("Ctrl-C at the prompt ends quietly, saving nothing", async () => {
+    const h = await harness({
+      token: null,
+      readSecret: async () => {
+        throw new Error("Canceled.");
+      },
+    });
+    const r = await h.run(["setup", "token"]);
+    expect(r.code).toBe(1);
+    expect(r.err).toBe("Canceled. Nothing was saved.\n");
+    expect(h.keychain.token).toBeNull();
   });
 
   test("a token Discord rejects is not saved", async () => {
