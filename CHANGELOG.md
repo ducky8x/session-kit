@@ -7,20 +7,20 @@ Discord companion: every interactive session can get its own channel in a privat
 ### Discord helper
 
 - `sk-discord`, a background helper compiled with Bun into one binary for Apple silicon and Intel Macs and started at login by a LaunchAgent. It holds the bot's connection to Discord, keeps the session list and the posts made while offline, and reads the bot token from the macOS Keychain.
-- A channel per interactive session, in a Desktop, VS Code or CLI category, named after the session with a `-desktop`, `-vs` or `-cli` suffix and renamed once the session has a name. A channel moves to Archive after 7 days without messages and is deleted after 30.
+- A channel per interactive session, in a Desktop, VS Code or CLI category, named after the session with a `-desktop`, `-vs` or `-cli` suffix and renamed once the session has a name. The channel appears at the session's first prompt or post, so sessions that never start a chat get none, and a chat that's cleared or moved to the background keeps its channel. A channel moves to Archive after 7 days without messages and is deleted after 30.
 - `sk-discord send` posts from a session. Permission prompts, input dialogs and questions nobody answers at the keyboard post with an @mention.
 - What you type in a session's channel reaches that session: at once while it listens, at the end of its turn while it's busy, by waking it when it's a closed terminal session, and when it's opened again for a closed desktop or VS Code session. `stop`, `pause`, `resume` and `status` work as commands.
-- A question left unanswered at the keyboard for 2 minutes goes to Discord, with a reminder at 30 minutes, the defaults taken at an hour, and hourly check-ins after that.
+- A question left unanswered at the keyboard for 2 minutes goes to Discord, with a reminder at 30 minutes, the defaults taken at an hour, and hourly check-ins after that. Typing at the keyboard, or pressing Esc on the question, keeps it off Discord.
 
 ### Skills
 
-- `discord`: `/discord on`, `off`, `status` and `update`, a guided setup that runs one step at a time, and the rules sessions follow to listen and post. You paste the bot token only into `sk-discord setup token` in your own terminal.
+- `discord`: `/discord on`, `off`, `status` and `update`, a guided setup that runs one step at a time, and the rules sessions follow to listen and post. You paste the bot token only into `sk-discord setup token` in your own terminal, or pipe it in with `pbpaste` when pasting at the hidden prompt doesn't work.
 - `start`: offers the Discord setup once, in the first session after installing session-kit, as a third startup question.
 
 ### Hooks
 
-- SessionStart also runs `hooks/discord.sh`, which registers the session with the helper, prints its channel and listener command, and updates the helper when its version differs from the plugin's.
-- SessionEnd, Notification (permission prompts and input dialogs), PreToolUse and PostToolUse for AskUserQuestion, and Stop hooks pass their events to the helper. Without the helper installed, they print nothing.
+- SessionStart also runs `hooks/discord.sh`, which registers the session with the helper, prints its listener command, and updates the helper when its version differs from the plugin's.
+- SessionEnd, Notification (permission prompts and input dialogs), PreToolUse and PostToolUse for AskUserQuestion, UserPromptSubmit, and Stop hooks pass their events to the helper. Without the helper installed, they print nothing.
 
 ### Releases
 
