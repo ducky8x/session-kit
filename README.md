@@ -4,7 +4,7 @@ session-kit is a Claude Code plugin that sets up every session the same way. Whe
 
 ## Install
 
-From GitHub, once the repository is published, run these in a Claude Code session:
+From GitHub, run these in a Claude Code session:
 
 ```text
 /plugin marketplace add ducky8x/session-kit
@@ -108,3 +108,11 @@ The tests run each hook with a temporary `HOME`, so they never touch your real `
 
 - **Skills with the same names** in `~/.claude/skills` (`start`, `autonomous-mode`, `load-context`, `create-context`, `update-context`, `brainstorm`): remove or rename them. Otherwise both copies load, Claude sees two skills for the same job, and the bare `/name` runs your copy.
 - **SessionStart or SubagentStart hooks** in `~/.claude/settings.json` that ask setup questions or inject a rules file: remove them. Plugin hooks run alongside the hooks in your settings, so you'd get both. Move your rules into `~/.claude/session-kit/rules.md`.
+
+## Reporting issues
+
+Report bugs and other problems on the [GitHub issues page](https://github.com/ducky8x/session-kit/issues).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

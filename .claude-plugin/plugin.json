@@ -3,6 +3,22 @@
   "version": "0.1.0",
   "description": "Sets up each Claude Code session: single-agent or multi-agent, autonomous mode, standing rules for every session and subagent, per-project context files, and task specs you approve before building.",
   "author": {
-    "name": "ducky8x"
-  }
+    "name": "ducky8x",
+    "url": "https://github.com/ducky8x"
+  },
+  "homepage": "https://github.com/ducky8x/session-kit",
+  "repository": "https://github.com/ducky8x/session-kit",
+  "license": "MIT",
+  "keywords": [
+    "session",
+    "workflow",
+    "autonomous",
+    "subagents",
+    "rules",
+    "project-context",
+    "specs"
+  ],
+  "icon": "./.claude-plugin/icon.png",
+  "documentationUrl": "https://github.com/ducky8x/session-kit#readme",
+  "supportUrl": "https://github.com/ducky8x/session-kit/issues"
 }
