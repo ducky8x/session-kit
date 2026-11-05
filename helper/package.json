@@ -1,0 +1,15 @@
+{
+  "name": "sk-discord",
+  "private": true,
+  "description": "The Discord helper for session-kit: one channel per Claude Code session.",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "bun run scripts/build.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.4",
+    "typescript": "^7.0.2"
+  }
+}
