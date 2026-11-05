@@ -78,9 +78,10 @@ Ask the user for the Application ID from the portal's General Information page. 
 
 ## 5. Pick the server
 
-Run `~/.claude/session-kit/bin/sk-discord setup server`. It lists the servers the bot is in.
+Run `~/.claude/session-kit/bin/sk-discord setup server`.
 
-- With one server, it picks that one. With more, ask the user which one (`AskUserQuestion`, with the server names as options) and give the choice to `setup server` the way its output says.
+- If the bot is in one server, it picks that one.
+- If the bot is in more than one server, it changes nothing: it lists them, one `<id>  <name>` per line, and exits with code 3. That isn't a failure. Ask the user which server to use (`AskUserQuestion`, with the server names as options), then run `~/.claude/session-kit/bin/sk-discord setup server --guild <id>` with that server's id.
 - The owner, the only person whose messages the bot reads, is the server's owner. Show the user the owner's name the command prints and ask them to confirm it's their account. If it isn't, stop: the server has to be one they own.
 - It creates the categories Desktop, VS Code, CLI and Archive and the `#session-kit` channel, and posts a welcome there.
 
