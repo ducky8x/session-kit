@@ -1,0 +1,176 @@
+name: release
+
+# Builds the Discord helper for both Mac architectures and publishes it as
+# release assets for the tag: sk-discord-darwin-arm64, sk-discord-darwin-x64
+# and checksums.txt. The tag must be v + the version in
+# .claude-plugin/plugin.json, which the helper bundles at build time.
+#
+# Run it by hand (workflow_dispatch) for a dry run: it does everything but
+# create the release. Give it a tag to check that tag against plugin.json.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and check everything, but don't create the release
+        type: boolean
+        default: true
+      tag:
+        description: Tag to check against plugin.json (default, the tag the run started from, else v + plugin.json's version)
+        type: string
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: release
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the tag against plugin.json
+        id: tag
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          version=$(sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' .claude-plugin/plugin.json | head -n 1)
+          if [ -z "$version" ]; then
+            echo "::error::No version in .claude-plugin/plugin.json"
+            exit 1
+          fi
+          if [ "$EVENT" = push ]; then
+            tag=$REF_NAME
+            dry_run=false
+          else
+            dry_run=$INPUT_DRY_RUN
+            if [ -n "$INPUT_TAG" ]; then
+              tag=$INPUT_TAG
+            elif [ "$REF_TYPE" = tag ]; then
+              tag=$REF_NAME
+            else
+              tag="v$version"
+            fi
+            # A manual run publishes only from the tag it was started on.
+            if [ "$dry_run" != true ] && { [ "$REF_TYPE" != tag ] || [ "$tag" != "$REF_NAME" ]; }; then
+              echo "::error::To publish from a manual run, start it from the tag $tag, or turn dry run on"
+              exit 1
+            fi
+          fi
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::Tag $tag doesn't match plugin.json's version $version (the tag should be v$version)"
+            exit 1
+          fi
+          echo "Tag $tag matches plugin.json's version $version (dry run: $dry_run)"
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "dry_run=$dry_run"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - name: Install dependencies
+        working-directory: helper
+        run: bun install --frozen-lockfile
+
+      - name: Run the helper tests
+        working-directory: helper
+        run: bun test
+
+      - name: Type-check
+        working-directory: helper
+        run: bunx tsc --noEmit
+
+      # The build script compiles both targets into helper/build and signs
+      # each binary ad hoc, so there's no separate signing step.
+      - name: Build and sign
+        working-directory: helper
+        run: bun run build
+
+      - name: Check the binaries
+        working-directory: helper/build
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          for arch in arm64 x64; do
+            f="sk-discord-darwin-$arch"
+            codesign --verify --strict "$f"
+            want=$arch
+            [ "$arch" = x64 ] && want=x86_64
+            have=$(lipo -archs "$f")
+            if [ "$have" != "$want" ]; then
+              echo "::error::$f is built for $have, not $want"
+              exit 1
+            fi
+          done
+          case $(uname -m) in
+            arm64) native=sk-discord-darwin-arm64 ;;
+            *) native=sk-discord-darwin-x64 ;;
+          esac
+          printed=$("./$native" --version)
+          if [ "$printed" != "$VERSION" ]; then
+            echo "::error::$native --version printed '$printed', not $VERSION"
+            exit 1
+          fi
+
+      - name: Write checksums.txt
+        working-directory: helper/build
+        run: |
+          shasum -a 256 sk-discord-darwin-arm64 sk-discord-darwin-x64 > checksums.txt
+          cat checksums.txt
+
+      - name: Write the release notes
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          awk -v v="$VERSION" '
+            /^## / { on = (index($0, "## " v " ") == 1); next }
+            on
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if [ ! -s "$RUNNER_TEMP/notes.md" ]; then
+            echo "::warning::CHANGELOG.md has no entry for $VERSION"
+            echo "Release $VERSION." > "$RUNNER_TEMP/notes.md"
+          fi
+          cat "$RUNNER_TEMP/notes.md"
+
+      - name: Create the release
+        if: steps.tag.outputs.dry_run != 'true'
+        working-directory: helper/build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "$TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            sk-discord-darwin-arm64 sk-discord-darwin-x64 checksums.txt
+
+      - name: Dry run summary
+        if: steps.tag.outputs.dry_run == 'true'
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          {
+            echo "Dry run for $TAG: built, signed and checked; no release created."
+            echo
+            echo '```'
+            cat helper/build/checksums.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
