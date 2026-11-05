@@ -49,6 +49,21 @@ export function readJsonFile(file: string): unknown {
   }
 }
 
+/** Read a file of JSON lines. A missing file is empty; a line that is not JSON is skipped. */
+export function readJsonLines(file: string): unknown[] {
+  if (!existsSync(file)) return [];
+  const values: unknown[] = [];
+  for (const line of readFileSync(file, "utf8").split("\n")) {
+    if (line.trim() === "") continue;
+    try {
+      values.push(JSON.parse(line) as unknown);
+    } catch {
+      // a torn or hand-edited line
+    }
+  }
+  return values;
+}
+
 export type Surface = "desktop" | "vs" | "cli";
 
 export const SURFACES: readonly Surface[] = ["desktop", "vs", "cli"];

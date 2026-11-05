@@ -1,8 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { RestClient } from "../src/discord/rest.ts";
 import { FileLogger, LOG_MAX_BYTES } from "../src/log.ts";
+import { Outbox } from "../src/outbound.ts";
 import { FakeClock } from "./fakes/fake-clock.ts";
+import { FakeDiscordRest } from "./fakes/fake-rest.ts";
 import { tmpDir } from "./helpers/tmp.ts";
+import { waitFor } from "./helpers/wait.ts";
 
 const TOKEN = "FAKE00000000000000000000.GabcDE.abcdefghijklmnopqrstuvwxyz0123456789AB";
 
@@ -59,5 +63,47 @@ describe("FileLogger", () => {
   test("a log folder that cannot be written does not throw", () => {
     const log = new FileLogger("/nonexistent-dir/for/sure/helper.log");
     expect(() => log.info("nobody hears this")).not.toThrow();
+  });
+});
+
+describe("what reaches the log from posting", () => {
+  test("refused, failing and dropped posts log routes and codes, never the text or the token", async () => {
+    const fake = await FakeDiscordRest.start();
+    try {
+      const dir = tmpDir();
+      const clock = new FakeClock();
+      const log = new FileLogger(`${dir}/helper.log`, { clock });
+      log.addSecret(TOKEN);
+      const rest = new RestClient({ baseUrl: fake.baseUrl, token: () => TOKEN, clock, log, maxRetries: 0 });
+      const channel = fake.addChannel({ name: "work-cli" });
+      const outbox = new Outbox({
+        file: `${dir}/outbox.jsonl`,
+        clock,
+        log,
+        rest,
+        controlChannelId: () => null,
+        resolveChannel: async () => channel.id,
+        onUnknownChannel: () => {},
+      });
+      const words = "the launch codes are in the second drawer";
+      fake.failNext({ path: /messages$/, status: 403, body: { code: 50001, message: `Missing Access: ${words}` } });
+      fake.failNext({ path: /messages$/, status: 500, body: { message: words } });
+      outbox.enqueue([
+        { target: "s1", content: words, allowedMentions: { parse: [] } },
+        { target: "s1", content: `${words} again`, allowedMentions: { parse: [] } },
+      ]);
+      outbox.setOnline(true);
+      await waitFor(() => clock.pending === 1);
+      await clock.advance(60_000);
+      await outbox.idle();
+      expect(fake.posted(channel.id).map((m) => m.content)).toEqual([`${words} again`]);
+      const text = readFileSync(`${dir}/helper.log`, "utf8");
+      expect(text).toContain("403");
+      expect(text).toContain("500");
+      expect(text).not.toContain("launch codes");
+      expect(text).not.toContain(TOKEN);
+    } finally {
+      fake.stop();
+    }
   });
 });
