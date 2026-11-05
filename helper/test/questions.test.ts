@@ -134,7 +134,44 @@ describe("telling a keyboard answer from a dialog that closed unanswered", () =>
     expect(classifyAskResponse('User has answered your questions: "Add a cache?"="Yes". You can now continue.')).toBe("answered");
   });
 
-  test("the auto-continue timeout's shapes mean unanswered", () => {
+  test("the terminal's answered shape, with its empty annotations, and a multi-select list mean answered", () => {
+    expect(classifyAskResponse({ ...ANSWERED, annotations: {} })).toBe("answered");
+    expect(classifyAskResponse({ questions: QUESTIONS, answers: { "Add a cache?": ["Yes", "Later"] } })).toBe("answered");
+  });
+
+  test("the idle timeout is unanswered, even when options were picked before the user went idle", () => {
+    expect(classifyAskResponse({ questions: QUESTIONS, answers: {}, annotations: {}, afkTimeoutMs: 60_000 })).toBe("unanswered");
+    expect(
+      classifyAskResponse({ questions: QUESTIONS, answers: { "Add a cache?": "Yes" }, annotations: {}, afkTimeoutMs: 300_000 }),
+    ).toBe("unanswered");
+    expect(classifyAskResponse("No response after 60s: the user may be away from keyboard. Proceed on your own judgment.")).toBe(
+      "unanswered",
+    );
+  });
+
+  test("a typed reply, a request for follow-up questions, or notes alone mean the user is at the keyboard", () => {
+    expect(classifyAskResponse({ questions: QUESTIONS, answers: {}, response: "Use whatever is cheapest" })).toBe("answered");
+    expect(classifyAskResponse({ questions: QUESTIONS, answers: {}, followUp: true })).toBe("answered");
+    expect(
+      classifyAskResponse({ questions: QUESTIONS, answers: {}, annotations: { "Add a cache?": { notes: "Only if it is cheap" } } }),
+    ).toBe("answered");
+  });
+
+  test("the words of the questions, the options and the user's own reply never decide it", () => {
+    const question = {
+      question: "What should happen when the job timed out?",
+      header: "Timeout",
+      options: [{ label: "Retry", description: "No answer from the server yet" }],
+      multiSelect: false,
+    };
+    expect(classifyAskResponse({ questions: [question], answers: { [question.question]: "Retry" } })).toBe("answered");
+    expect(classifyAskResponse({ questions: QUESTIONS, answers: {}, response: "No answer from me, you pick" })).toBe("answered");
+    expect(
+      classifyAskResponse('User has answered your questions: "Did the job time out?"="No answer yet". You can now continue.'),
+    ).toBe("answered");
+  });
+
+  test("results with no answer, or that say the user did not answer, mean unanswered", () => {
     expect(classifyAskResponse({ questions: QUESTIONS, answers: {} })).toBe("unanswered");
     expect(classifyAskResponse({ questions: QUESTIONS, answers: { "Add a cache?": "" } })).toBe("unanswered");
     expect(
@@ -176,7 +213,8 @@ describe("question timing", () => {
   test("a dialog that closed unanswered keeps the question open: it still goes to Discord at 2:00", async () => {
     const k = await asked();
     await k.clock.advance(MINUTE);
-    const timedOut = { questions: QUESTIONS, answers: {}, message: "The user may be away from their keyboard." };
+    // The idle timeout's result: what was picked before the user went idle, and how long Claude Code waited.
+    const timedOut = { questions: QUESTIONS, answers: { "Add a cache?": "Yes" }, annotations: {}, afkTimeoutMs: 60_000 };
     expect((await k.cli(["hook", "post-ask"], { stdin: postAsk(k.sessionId, timedOut) })).code).toBe(0);
     await k.clock.advance(MINUTE);
     await k.settle();

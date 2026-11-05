@@ -22,6 +22,10 @@ describe("the wake command and prompt", () => {
     expect(buildResumeCommand({ bin: BIN, sessionId: SID, prompt: "p" })).toEqual([BIN, "--bg", "--resume", SID, "p"]);
   });
 
+  test("passes the session id in lowercase, the only form the CLI continues in place", () => {
+    expect(buildResumeCommand({ bin: BIN, sessionId: SID.toUpperCase(), prompt: "p" })).toEqual([BIN, "--bg", "--resume", SID, "p"]);
+  });
+
   test("the prompt says how the session was woken and what to do first", () => {
     expect(wakePrompt("run the tests")).toBe(
       "You were woken by a Discord message in your channel: run the tests. Start the Discord listener again (session-kit:discord skill), then handle the message.",
@@ -32,6 +36,11 @@ describe("the wake command and prompt", () => {
   test("reads the short id from the backgrounded line, and nothing else", () => {
     expect(parseBackgroundedId("woke session x\nbackgrounded · 0123abcd\n")).toBe("0123abcd");
     expect(parseBackgroundedId("started bg-1")).toBeNull();
+  });
+
+  test("reads the short id when the CLI colors it", () => {
+    const colored = "backgrounded · \u001b[36m0123abcd\u001b[39m · demo\n\u001b[2m  claude agents   list sessions\u001b[22m\n";
+    expect(parseBackgroundedId(colored)).toBe("0123abcd");
   });
 });
 
@@ -52,6 +61,13 @@ describe("what state a session is in", () => {
     expect(status([bg({ pid: null, status: null })])).toEqual({ kind: "stopped", shortId: "a1b2c3d4" });
     expect(status([bg()], dead)).toEqual({ kind: "stopped", shortId: "a1b2c3d4" });
     expect(status([{ pid: 7, sessionId: SID.toUpperCase(), kind: "interactive" }])).toEqual({ kind: "interactive" });
+  });
+
+  test("a background session that failed or was stopped, with its process alive, is finished like a done one", () => {
+    for (const state of ["done", "failed", "stopped"]) {
+      expect(status([bg({ state, status: undefined })])).toEqual({ kind: "idle", shortId: "a1b2c3d4" });
+      expect(status([bg({ state, status: "idle" })])).toEqual({ kind: "idle", shortId: "a1b2c3d4" });
+    }
   });
 
   test("presence in one word", () => {
@@ -83,6 +99,15 @@ describe("Waker", () => {
     const outcome = await w.wake({ sessionId: SID, cwd: "/work/demo" }, wakePrompt("hi"), "hi");
     expect(outcome.kind).toBe("started");
     expect(cli.stops).toEqual([row.id!]);
+    expect(cli.wakes()).toHaveLength(1);
+    expect(cli.copies()).toHaveLength(0);
+  });
+
+  test("a session id recorded in capitals is still resumed under its own id, not as a copy", async () => {
+    const { w, cli } = waker();
+    cli.addClosed(SID);
+    const outcome = await w.wake({ sessionId: SID.toUpperCase(), cwd: "/work/demo" }, wakePrompt("hi"), "hi");
+    expect(outcome.kind).toBe("started");
     expect(cli.wakes()).toHaveLength(1);
     expect(cli.copies()).toHaveLength(0);
   });

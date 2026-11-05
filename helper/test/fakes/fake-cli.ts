@@ -6,20 +6,25 @@ import { FakeProcessRunner } from "./fake-process.ts";
  * A stand-in for the `claude` CLI that behaves the way the real one was seen to behave, and refuses (and
  * remembers) anything the real one would not take:
  *
- *  - `agents --json [--all]` lists sessions as JSON rows. A background row has `id` (8 hex), `sessionId`,
- *    `kind: "background"`, `cwd`, `name`, `state` (working | done | blocked), `status` (idle | busy | null) and
- *    `pid` (null once stopped). An interactive row has `pid`, `sessionId`, `kind: "interactive"`, `name`,
- *    `status` and no `id`. Without `--all` only live rows are listed.
+ *  - `agents --json [--all]` lists sessions as JSON rows. Every row has `cwd`, `kind`, `startedAt`,
+ *    `sessionId` and `name`, plus `pid` and `status` (idle | busy | waiting) while its process is alive. A
+ *    background row also has `id` (8 hex) and `state` (working | blocked | done | failed | stopped). An
+ *    interactive row (the desktop app, VS Code or a terminal) has no `id` and no `state`. Without `--all`, a
+ *    background row whose process is gone is listed only while it is working or blocked.
  *  - `--bg --resume <id|sessionId> <prompt>` with NO other flag wakes a stopped session under its own id. On a
- *    session whose process is alive it starts a COPY under a new id. ANY extra flag also starts a copy.
+ *    session whose process is alive it starts a COPY under a new id. ANY extra flag also starts a copy, and so
+ *    does a session id that is not all lowercase.
  *  - `stop <id>` stops a background session (its pid becomes null).
  *
  * Nothing real is started. Every violation fails the test that caused it, when it ends.
  */
 export const BIN = "/opt/tools/claude";
 
-export type RowState = "working" | "done" | "blocked";
-export type RowStatus = "idle" | "busy" | null;
+export type RowState = "working" | "blocked" | "done" | "failed" | "stopped";
+export type RowStatus = "idle" | "busy" | "waiting" | null;
+
+/** When every fake session started (the real CLI prints the time each one did). */
+const STARTED_AT = 1_762_300_000_000;
 
 export interface FakeRow {
   id?: string;
@@ -181,8 +186,10 @@ export class FakeCli extends FakeProcessRunner {
       return this.fail(64, "error: bad arguments");
     }
     if (this.listCode !== 0) return this.fail(this.listCode, "error: list failed");
-    const visible = this.rows.filter((r) => all || r.pid !== null);
-    return this.ok(JSON.stringify(visible.map(toJson)));
+    const visible = this.rows.filter(
+      (r) => all || r.pid !== null || (r.kind === "background" && (r.state === "working" || r.state === "blocked")),
+    );
+    return this.ok(`${JSON.stringify(visible.map(toJson), null, 2)}\n`);
   }
 
   private stop(args: string[]): RunResult {
@@ -224,15 +231,19 @@ export class FakeCli extends FakeProcessRunner {
       this.violations.push("--resume without an id");
       return this.fail(64, "error: --resume needs an id");
     }
-    let target = this.rows.find((r) => r.sessionId === ref || r.id === ref);
-    if (!target && this.closed.has(ref)) {
-      target = { sessionId: ref, kind: "background", cwd: cwd ?? "/", name: "demo", state: "done", status: null, pid: null };
+    const wanted = ref.toLowerCase();
+    let target = this.rows.find((r) => r.sessionId.toLowerCase() === wanted || r.id === ref);
+    const closed = [...this.closed].find((id) => id.toLowerCase() === wanted);
+    if (!target && closed !== undefined) {
+      target = { sessionId: closed, kind: "background", cwd: cwd ?? "/", name: "demo", state: "done", status: null, pid: null };
       this.rows.push(target);
     }
     if (!target) return this.fail(1, `${this.notFoundText}: ${ref}`);
     if (extra.length > 0) this.violations.push(`resume with extra flags: ${extra.join(" ")}`);
     const live = target.pid !== null;
-    if (live || extra.length > 0) {
+    // The real CLI continues a session in place only when given its full id in lowercase.
+    const unresolved = ref !== target.id && ref !== ref.toLowerCase();
+    if (live || extra.length > 0 || unresolved) {
       const copy: FakeRow = {
         id: this.shortId(),
         sessionId: this.uuid(),
@@ -262,8 +273,16 @@ export class FakeCli extends FakeProcessRunner {
 }
 
 function toJson(row: FakeRow): Record<string, unknown> {
-  if (row.kind === "interactive") {
-    return { pid: row.pid, sessionId: row.sessionId, kind: "interactive", name: row.name, status: row.status };
-  }
-  return { id: row.id, sessionId: row.sessionId, kind: "background", cwd: row.cwd, name: row.name, state: row.state, status: row.status, pid: row.pid };
+  const alive = row.pid !== null;
+  return {
+    ...(alive ? { pid: row.pid } : {}),
+    ...(row.kind === "background" ? { id: row.id } : {}),
+    cwd: row.cwd,
+    kind: row.kind,
+    startedAt: STARTED_AT,
+    sessionId: row.sessionId,
+    name: row.name,
+    ...(alive && row.status !== null ? { status: row.status } : {}),
+    ...(row.kind === "background" ? { state: row.state } : {}),
+  };
 }

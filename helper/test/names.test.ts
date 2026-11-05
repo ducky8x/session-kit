@@ -87,6 +87,36 @@ describe("parseAgentList", () => {
     expect(entries).toEqual([{ pid: 11, sessionId: "s2", kind: "interactive", name: "m", status: "busy", cwd: "/w" }, {}]);
   });
 
+  test("reads the rows in the shape the CLI prints them", () => {
+    const sid = (n: number) => `1f0e2c9a-0000-4000-8000-00000000000${n}`;
+    const listed = [
+      // Open in the desktop app and in VS Code: interactive, with no id, no state and no entry point.
+      { pid: 4101, cwd: "/work/app", kind: "interactive", startedAt: 1762300000000, sessionId: sid(1), name: "Fix login bug", status: "idle" },
+      { pid: 4102, cwd: "/work/docs", kind: "interactive", startedAt: 1762300001000, sessionId: sid(2), name: "Docs pass", status: "busy" },
+      // In the background and waiting on a dialog.
+      {
+        pid: 4103,
+        id: "2b3c4d5e",
+        cwd: "/work/app",
+        kind: "background",
+        startedAt: 1762300002000,
+        sessionId: sid(3),
+        name: "Migrate",
+        status: "waiting",
+        waitingFor: "dialog",
+        state: "blocked",
+      },
+      // Finished, its process gone (listed with --all): no pid and no status.
+      { id: "3c4d5e6f", cwd: "/work/app", kind: "background", startedAt: 1762300003000, sessionId: sid(4), name: "Old run", state: "done" },
+    ];
+    expect(parseAgentList(`${JSON.stringify(listed, null, 2)}\n`)).toEqual([
+      { pid: 4101, cwd: "/work/app", kind: "interactive", sessionId: sid(1), name: "Fix login bug", status: "idle" },
+      { pid: 4102, cwd: "/work/docs", kind: "interactive", sessionId: sid(2), name: "Docs pass", status: "busy" },
+      { pid: 4103, id: "2b3c4d5e", cwd: "/work/app", kind: "background", sessionId: sid(3), name: "Migrate", status: "waiting", state: "blocked" },
+      { id: "3c4d5e6f", cwd: "/work/app", kind: "background", sessionId: sid(4), name: "Old run", state: "done" },
+    ]);
+  });
+
   test("also reads a list wrapped in an object, and returns null for shapes it does not know", () => {
     expect(parseAgentList(JSON.stringify({ sessions: [{ sessionId: "s1" }] }))).toEqual([{ sessionId: "s1" }]);
     expect(parseAgentList(JSON.stringify({ agents: [{ session_id: "s2" }] }))).toEqual([{ sessionId: "s2" }]);
