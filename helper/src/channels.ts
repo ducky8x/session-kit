@@ -79,7 +79,10 @@ export interface Timing {
   /** No messages for this long: the channel is deleted and the session forgotten. */
   deleteMs: number;
   renameSpacingMs: number;
-  /** How long `register` waits for a new channel before answering "being created". */
+  /**
+   * How long `register` waits for a new channel before answering "being created". The session-start hook
+   * gives the whole call 2 seconds.
+   */
   registerWaitMs: number;
 }
 
@@ -87,7 +90,7 @@ export const DEFAULT_TIMING: Timing = {
   archiveMs: 7 * DAY_MS,
   deleteMs: 30 * DAY_MS,
   renameSpacingMs: RENAME_SPACING_MS,
-  registerWaitMs: 1500,
+  registerWaitMs: 1200,
 };
 
 function positiveDays(value: string | undefined): number | null {

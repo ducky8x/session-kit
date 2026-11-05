@@ -208,6 +208,15 @@ describe("hook session-end", () => {
   });
 });
 
+describe("timing", () => {
+  test("the helper answers register well inside the hook's 2-second wait", async () => {
+    const { DEFAULT_TIMING } = await import("../src/channels.ts");
+    const { REGISTER_TIMEOUT_MS } = await import("../src/hooks/session-start.ts");
+    expect(REGISTER_TIMEOUT_MS).toBe(2000);
+    expect(DEFAULT_TIMING.registerWaitMs).toBeLessThanOrEqual(REGISTER_TIMEOUT_MS - 500);
+  });
+});
+
 describe("hook dispatch", () => {
   test("an event this version does not know exits 0 with nothing printed", async () => {
     const h = harness();
