@@ -11,7 +11,7 @@ describe("hook notification", () => {
   test("permission_prompt and elicitation_dialog post with a ping", async () => {
     const k = await daemonKit();
     await k.connected();
-    await k.register(SID);
+    await k.startChat(SID);
     const channelId = k.daemon.sessions.get(SID)!.channelId!;
     for (const [type, message] of [
       ["permission_prompt", "Claude needs your permission to use Bash"],
@@ -25,6 +25,17 @@ describe("hook notification", () => {
       [`<@${OWNER_ID}> Claude needs your permission to use Bash`, { parse: [], users: [OWNER_ID] }],
       [`<@${OWNER_ID}> Claude is asking for input`, { parse: [], users: [OWNER_ID] }],
     ]);
+  });
+
+  test("a permission prompt in a session with no channel yet makes the channel and posts there", async () => {
+    const k = await daemonKit();
+    await k.connected();
+    await k.register(SID);
+    expect(await k.cli(["hook", "notification"], { stdin: hookInput("permission_prompt") })).toEqual({ code: 0, out: "", err: "" });
+    await waitFor(() => k.daemon.sessions.get(SID)?.channelId != null);
+    const channelId = k.daemon.sessions.get(SID)!.channelId!;
+    await waitFor(() => k.rest.posted(channelId).length === 1);
+    expect(k.rest.posted(channelId)[0]!.content).toBe(`<@${OWNER_ID}> Claude needs your permission to use Bash`);
   });
 
   test("idle_prompt and auth_success post nothing", async () => {

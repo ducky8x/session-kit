@@ -9,7 +9,7 @@ import { waitFor } from "./helpers/wait.ts";
 async function connectedWithSession() {
   const k = await daemonKit();
   await k.connected();
-  await k.register(SID);
+  await k.startChat(SID);
   const channelId = k.daemon.sessions.get(SID)!.channelId!;
   return { ...k, channelId };
 }

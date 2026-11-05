@@ -11,6 +11,18 @@ export const REGISTER_TIMEOUT_MS = 2000;
 export const NOT_OFFERED =
   'Discord: not offered yet. Add the question "Set up Discord now?" to the startup questions (session-kit:start skill).';
 export const LISTENER_HINT = "Start it as a background command now, and again after every event (session-kit:discord skill).";
+/** The first line for a session whose chat (and so its channel) hasn't started yet. */
+export const NO_CHANNEL_YET = "Discord: no channel yet. This session gets one at its first prompt or post.";
+
+/**
+ * The Claude Code process from `CLAUDE_PID`, which Claude Code sets for every hook it runs, or null. A new
+ * session id from the same process (`/clear`) keeps the earlier session's channel.
+ */
+export function processId(value: string | undefined): number | null {
+  if (value === undefined || !/^[0-9]+$/.test(value)) return null;
+  const pid = Number(value);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
 
 /** The listener command, written with `~` so it reads the same on every machine. */
 export function listenerCommand(sessionId: string): string {
@@ -30,8 +42,8 @@ export interface HookDeps {
 
 /**
  * `sk-discord hook session-start`: register the session with the helper and print the lines the session
- * reads (its channel, the listener command). Exits 0 with nothing printed when Discord is off or the session
- * isn't interactive, and non-zero (printing nothing) when something fails.
+ * reads (its channel, or that it has none yet, and the listener command). Exits 0 with nothing printed when
+ * Discord is off or the session isn't interactive, and non-zero (printing nothing) when something fails.
  */
 export async function sessionStartHook(deps: HookDeps): Promise<number> {
   const input = parseHookInput(await deps.readStdin());
@@ -60,6 +72,7 @@ export async function sessionStartHook(deps: HookDeps): Promise<number> {
         cwd: stringField(input, "cwd") ?? "",
         transcriptPath: stringField(input, "transcript_path"),
         entrypoint: entrypoint ?? null,
+        claudePid: processId(deps.env.CLAUDE_PID),
       },
       { timeoutMs: deps.timeoutMs ?? REGISTER_TIMEOUT_MS },
     );
@@ -84,8 +97,12 @@ export async function sessionStartHook(deps: HookDeps): Promise<number> {
     return 0;
   }
 
-  const where = reply.pending === true || typeof reply.category !== "string" ? "being created" : reply.category;
-  deps.out(`Discord: #${reply.channelName} (${where})\n`);
+  if (reply.linked === false) {
+    deps.out(`${NO_CHANNEL_YET}\n`);
+  } else {
+    const where = reply.pending === true || typeof reply.category !== "string" ? "being created" : reply.category;
+    deps.out(`Discord: #${reply.channelName} (${where})\n`);
+  }
   deps.out(`Discord listener: ${listenerCommand(sessionId)}\n`);
   deps.out(`${LISTENER_HINT}\n`);
   return 0;

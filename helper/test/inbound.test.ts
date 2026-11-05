@@ -86,7 +86,7 @@ describe("control words", () => {
 
   test("status in #session-kit lists every linked session; anything else there gets a pointer", async () => {
     const k = await inboundKit();
-    await k.register("bbbb2222", "claude-desktop");
+    await k.startChat("bbbb2222", "claude-desktop");
     k.claude.addInteractive(k.sessionId);
     await k.say("status", { channelId: k.control.id });
     const listing = k.rest.posted(k.control.id).at(-1)!.content.split("\n");

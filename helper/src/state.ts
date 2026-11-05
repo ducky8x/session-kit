@@ -80,7 +80,7 @@ export const INBOX_LIMIT = 50;
 /** One session the helper knows, keyed by its session id in `sessions.json`. */
 export interface SessionEntry {
   sessionId: string;
-  /** The session's channel. Null while it has none: not created yet, or deleted (unlinked). */
+  /** The session's channel. Null while it has none: its chat hasn't started yet, or it was deleted (unlinked). */
   channelId: string | null;
   /** The session's name as last seen. Null, empty or "New session" means it has none yet. */
   name: string | null;
@@ -102,12 +102,19 @@ export interface SessionEntry {
   question: Record<string, unknown> | null;
   /** When the channel was last renamed, for the 5-minute rename spacing. */
   renamedAt: number | null;
-  /** The channel should be made as soon as Discord is reachable (registered while offline). */
+  /** The channel should be made as soon as Discord is reachable (the chat started while offline). */
   wantsChannel: boolean;
   /** When the session's run was marked finished (`send --done`), which stops check-ins. */
   doneAt: number | null;
   /** When the session last posted with `send`. */
   lastSendAt: number | null;
+  /**
+   * The Claude Code process the session last started in (`CLAUDE_PID` in the hooks' environment), or null when
+   * the hook didn't say. A new session id in the same process (`/clear`) carries on the same chat.
+   */
+  claudePid: number | null;
+  /** The session that continued this chat and took over its channel, or null. */
+  movedTo: string | null;
 }
 
 export function newSession(o: {
@@ -136,6 +143,8 @@ export function newSession(o: {
     wantsChannel: false,
     doneAt: null,
     lastSendAt: null,
+    claudePid: null,
+    movedTo: null,
   };
 }
 
@@ -173,6 +182,8 @@ function readEntry(sessionId: string, raw: unknown): SessionEntry | null {
     wantsChannel: r.wantsChannel === true,
     doneAt: num(r.doneAt),
     lastSendAt: num(r.lastSendAt),
+    claudePid: num(r.claudePid),
+    movedTo: str(r.movedTo),
   };
 }
 

@@ -3,7 +3,7 @@ import { defaultConfig, saveConfig } from "../src/config.ts";
 import { type CliDeps, runCli } from "../src/main.ts";
 import { pathsFor } from "../src/paths.ts";
 import { HELPER_DOWN } from "../src/status.ts";
-import { LISTENER_HINT, NOT_OFFERED } from "../src/hooks/session-start.ts";
+import { LISTENER_HINT, NO_CHANNEL_YET, NOT_OFFERED } from "../src/hooks/session-start.ts";
 import { StubHelper } from "./fakes/stub-helper.ts";
 import { tmpDir } from "./helpers/tmp.ts";
 
@@ -63,6 +63,7 @@ describe("hook session-start", () => {
         cwd: "/work/session-kit",
         transcriptPath: "/t/caa2.jsonl",
         entrypoint: "claude-desktop",
+        claudePid: null,
       },
     ]);
     expect(h.text()).toBe(
@@ -74,6 +75,38 @@ describe("hook session-start", () => {
       ].join("\n"),
     );
     expect(LISTENER_HINT).toBe("Start it as a background command now, and again after every event (session-kit:discord skill).");
+  });
+
+  test("passes on the Claude Code process the session runs in, so a new session id from it keeps the chat", async () => {
+    for (const [value, sent] of [
+      ["4242", 4242],
+      ["not a number", null],
+      ["-3", null],
+    ] as const) {
+      const h = harness();
+      h.deps.env.CLAUDE_PID = value;
+      const stub = h.stub(() => ({ ok: true, registered: true, channelName: "x-desktop", category: "Desktop", pending: false, linked: true }));
+      expect(await runCli(["hook", "session-start"], h.deps)).toBe(0);
+      expect(stub.requests[0]!.claudePid).toBe(sent);
+    }
+  });
+
+  test("a session with no channel yet hears when it gets one, and still gets the listener", async () => {
+    const h = harness();
+    h.stub(() => ({
+      ok: true,
+      registered: true,
+      channelName: "session-kit-caa2-desktop",
+      category: "Desktop",
+      pending: true,
+      linked: false,
+      status: "connected",
+    }));
+    expect(await runCli(["hook", "session-start"], h.deps)).toBe(0);
+    expect(h.text()).toBe(
+      [NO_CHANNEL_YET, `Discord listener: ~/.claude/session-kit/bin/sk-discord listen --session ${SID}`, LISTENER_HINT, ""].join("\n"),
+    );
+    expect(NO_CHANNEL_YET).toBe("Discord: no channel yet. This session gets one at its first prompt or post.");
   });
 
   test("a channel still being made says so", async () => {

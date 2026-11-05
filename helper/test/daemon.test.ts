@@ -10,7 +10,9 @@ import { AlreadyRunning } from "../src/server.ts";
 import { MemoryKeychain } from "./fakes/fake-keychain.ts";
 import { FakeProcessRunner } from "./fakes/fake-process.ts";
 import { GUILD_ID, OWNER_ID } from "./fakes/fake-rest.ts";
+import { sessionFeatures } from "../src/features.ts";
 import { SID, daemonKit } from "./helpers/daemon-kit.ts";
+import { transcripts } from "./helpers/transcripts.ts";
 import { waitFor } from "./helpers/wait.ts";
 
 function ownerMessage(channelId: string, content = "hello", authorId = OWNER_ID): DiscordMessage {
@@ -113,7 +115,7 @@ describe("daemon start and status", () => {
 });
 
 describe("daemon sessions", () => {
-  test("register over the socket makes the channel and answers with it", async () => {
+  test("register answers with the channel to come and makes nothing on Discord", async () => {
     const k = await daemonKit();
     await k.connected();
     const reply = await k.register(SID, "claude-desktop");
@@ -122,11 +124,31 @@ describe("daemon sessions", () => {
       registered: true,
       channelName: "session-kit-caa2-desktop",
       category: "Desktop",
-      pending: false,
+      pending: true,
+      linked: false,
       status: "connected",
       notice: false,
     });
-    expect(k.rest.channelNamed("session-kit-caa2-desktop")?.parent_id).toBe(k.categories.desktop.id);
+    await k.daemon.settle();
+    expect(k.rest.requests.filter((r) => r.method !== "GET")).toHaveLength(0);
+  });
+
+  test("the end of the session's first turn makes its channel", async () => {
+    const k = await daemonKit();
+    await k.connected();
+    await k.register(SID, "claude-desktop");
+    expect(await k.call({ op: "stop-hook", sessionId: SID })).toEqual({ ok: true });
+    await waitFor(() => k.rest.channelNamed("session-kit-caa2-desktop") !== undefined);
+    expect(k.rest.channelNamed("session-kit-caa2-desktop")!.parent_id).toBe(k.categories.desktop.id);
+    expect(await k.register(SID, "claude-desktop", "resume")).toMatchObject({ pending: false, linked: true });
+  });
+
+  test("a prompt the user typed makes the channel", async () => {
+    const k = await daemonKit();
+    await k.connected();
+    await k.register(SID);
+    await k.call({ op: "present", sessionId: SID });
+    await waitFor(() => k.rest.channelNamed("session-kit-caa2-cli") !== undefined);
   });
 
   test("a session that is not interactive is not registered", async () => {
@@ -146,11 +168,12 @@ describe("daemon sessions", () => {
     expect(k.rest.requests.length).toBe(before);
   });
 
-  test("a session registered while offline gets its channel when the gateway connects", async () => {
+  test("a chat that starts while offline gets its channel when the gateway connects", async () => {
     const k = await daemonKit({ noStart: true });
     k.gateway.autoHello = false;
     await k.daemon.start();
     expect(await k.register(SID)).toMatchObject({ pending: true, status: "connecting" });
+    await k.call({ op: "stop-hook", sessionId: SID });
     await waitFor(() => k.gateway.connections.length === 1);
     k.gateway.hello();
     await waitFor(() => k.rest.channelNamed("session-kit-caa2-cli") !== undefined);
@@ -159,7 +182,7 @@ describe("daemon sessions", () => {
   test("CHANNEL_DELETE for a session's channel unlinks the session", async () => {
     const k = await daemonKit();
     await k.connected();
-    await k.register(SID);
+    await k.startChat(SID);
     const channelId = k.daemon.sessions.get(SID)!.channelId!;
     k.rest.channels.delete(channelId);
     k.gateway.dispatch("CHANNEL_DELETE", { id: channelId, guild_id: GUILD_ID, type: 0 });
@@ -169,8 +192,8 @@ describe("daemon sessions", () => {
   test("a restart reloads sessions and the outbox, and unlinks sessions whose channel went away", async () => {
     const first = await daemonKit();
     await first.connected();
-    await first.register(SID);
-    await first.register("bbbb0000");
+    await first.startChat(SID);
+    await first.startChat("bbbb0000");
     const gone = first.daemon.sessions.get("bbbb0000")!.channelId!;
     await first.daemon.stop();
     first.rest.channels.delete(gone);
@@ -202,7 +225,7 @@ describe("daemon sessions", () => {
         : undefined,
     );
     await k.connected();
-    await k.register(SID);
+    await k.startChat(SID);
     await k.clock.advance(0); // the first poll
     await k.daemon.settle();
     await waitFor(() => k.rest.channelNamed("fix-login-bug-cli") !== undefined);
@@ -214,7 +237,7 @@ describe("daemon inbound seam", () => {
   test("every message in the server reaches the handlers in order, with its session", async () => {
     const k = await daemonKit();
     await k.connected();
-    await k.register(SID);
+    await k.startChat(SID);
     const channelId = k.daemon.sessions.get(SID)!.channelId!;
     const seen: [string | undefined, string | null][] = [];
     k.daemon.onInbound((message, session) => void seen.push([message.content, session?.sessionId ?? null]));
@@ -234,7 +257,7 @@ describe("daemon inbound seam", () => {
   test("an owner message in an archived channel moves it back before the handlers see it", async () => {
     const k = await daemonKit();
     await k.connected();
-    await k.register(SID);
+    await k.startChat(SID);
     const channelId = k.daemon.sessions.get(SID)!.channelId!;
     k.daemon.sessions.update(SID, (e) => {
       e.lastMessageAt -= 8 * DAY_MS;
@@ -254,7 +277,7 @@ describe("daemon inbound seam", () => {
   test("a post updates the channel's last message time", async () => {
     const k = await daemonKit();
     await k.connected();
-    await k.register(SID);
+    await k.startChat(SID);
     await k.clock.advance(5000);
     k.daemon.post(SID, "progress");
     await k.daemon.settle();
@@ -264,7 +287,7 @@ describe("daemon inbound seam", () => {
   test("a tagged post reports its message id once it is out", async () => {
     const k = await daemonKit();
     await k.connected();
-    await k.register(SID);
+    await k.startChat(SID);
     const posted: { tag: string | null; messageId: string }[] = [];
     k.daemon.onPosted((e) => posted.push({ tag: e.tag, messageId: e.messageId }));
     k.daemon.post(SID, "question 1", { tag: "q-1", ping: true });
@@ -388,5 +411,46 @@ describe("sk-discord daemon", () => {
     });
     expect(ran).toBe(true);
     expect(code).toBe(0);
+  });
+});
+
+describe("one chat, one channel", () => {
+  const A = "aaaa1111-0000-4000-8000-000000000001";
+  const B = "bbbb2222-0000-4000-8000-000000000002";
+  const C = "cccc3333-0000-4000-8000-000000000003";
+
+  test("a chat moved to the background, the session that continues it and a spare session share one channel", async () => {
+    const k = await daemonKit();
+    await k.connected();
+    const t = transcripts();
+    const register = (sessionId: string, source: string, transcriptPath: string, claudePid: number) =>
+      k.call({ op: "register", sessionId, source, cwd: "/work/home", transcriptPath, entrypoint: "cli", claudePid });
+    await register(A, "startup", t.chat(A), 100);
+    await k.call({ op: "stop-hook", sessionId: A });
+    await waitFor(() => k.daemon.sessions.get(A)?.channelId != null);
+    const channelId = k.daemon.sessions.get(A)!.channelId!;
+    const listener = k.call({ op: "listen", sessionId: A });
+    await waitFor(() => sessionFeatures(k.daemon).hub.isListening(A));
+
+    t.continuedIn(A, B);
+    expect(await register(C, "startup", t.pathOf(C), 300)).toMatchObject({ linked: false });
+    expect(await register(B, "fork", t.pathOf(B), 200)).toMatchObject({ linked: true });
+    expect((await listener).event).toEqual({ type: "replaced" });
+    expect((await k.call({ op: "listen", sessionId: A })).event).toEqual({ type: "replaced" });
+    for (const id of [B, C, A]) await k.call({ op: "ended", sessionId: id, reason: "other" });
+
+    const seen: (string | null)[] = [];
+    k.daemon.onInbound((_message, session) => void seen.push(session?.sessionId ?? null));
+    k.gateway.dispatch("MESSAGE_CREATE", ownerMessage(channelId, "still there?"));
+    await waitFor(() => seen.length === 1);
+    expect(seen).toEqual([B]);
+
+    await k.clock.advance(5000);
+    k.daemon.post(A, "a post addressed to the earlier session");
+    await k.daemon.settle();
+    expect(k.rest.posted(channelId).map((m) => m.content)).toContain("a post addressed to the earlier session");
+    expect(k.daemon.sessions.get(B)!.lastMessageAt).toBe(k.clock.now());
+    const made = k.rest.requests.filter((r) => r.method === "POST" && r.path === `/guilds/${GUILD_ID}/channels` && r.body?.type === 0);
+    expect(made).toHaveLength(1);
   });
 });

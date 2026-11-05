@@ -1,4 +1,11 @@
-import { ChannelManager, type ChannelMessage, type Timing, surfaceFor, timingFromEnv } from "./channels.ts";
+import {
+  ChannelManager,
+  type ChannelMessage,
+  type Timing,
+  type UnlinkReason,
+  surfaceFor,
+  timingFromEnv,
+} from "./channels.ts";
 import type { Clock } from "./clock.ts";
 import { type Config, loadConfig } from "./config.ts";
 import { GatewayClient, type GatewayState } from "./discord/gateway.ts";
@@ -79,6 +86,10 @@ function optionalText(value: unknown): string | null {
   return typeof value === "string" && value !== "" ? value : null;
 }
 
+function positiveInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
 /**
  * `sk-discord daemon`: holds the gateway connection, the session registry and the outbox, serves the control
  * socket and runs the timers. With Discord off it still serves the socket (for `status` and turning it on)
@@ -107,7 +118,7 @@ export class Daemon {
   private readonly postedListeners: ((event: PostedEvent) => void)[] = [];
   private readonly dispatchListeners: ((type: string, data: any) => void)[] = [];
   private readonly configListeners: ((config: Config, before: Config) => void)[] = [];
-  private readonly unlinkedListeners: ((sessionId: string, why: "deleted" | "removed") => void)[] = [];
+  private readonly unlinkedListeners: ((sessionId: string, why: UnlinkReason) => void)[] = [];
   private inboundChain: Promise<void> = Promise.resolve();
   private readonly background = new Set<Promise<unknown>>();
 
@@ -159,12 +170,14 @@ export class Daemon {
       controlChannelId: () => this.config.controlChannelId,
       resolveChannel: async (entry) =>
         entry.target === "control" ? this.config.controlChannelId : this.channels.ensureChannel(entry.target),
-      onUnknownChannel: (entry) => {
-        if (entry.target !== "control") this.sessions.unlink(entry.target);
+      // A post for a session goes to the channel its chat has now, which may belong to a later session.
+      onUnknownChannel: (entry, channelId) => {
+        if (entry.target === "control") return;
+        this.sessions.unlink(this.sessions.byChannel(channelId)?.sessionId ?? entry.target);
       },
       onPosted: (entry, channelId, messageId) => {
         if (entry.target !== "control") {
-          this.sessions.update(entry.target, (e) => {
+          this.sessions.update(this.sessions.byChannel(channelId)?.sessionId ?? entry.target, (e) => {
             e.lastMessageAt = clock.now();
           });
         }
@@ -212,7 +225,7 @@ export class Daemon {
   }
 
   /** A session lost its channel (see `ChannelDeps.onUnlinked`). */
-  onUnlinked(listener: (sessionId: string, why: "deleted" | "removed") => void): void {
+  onUnlinked(listener: (sessionId: string, why: UnlinkReason) => void): void {
     this.unlinkedListeners.push(listener);
   }
 
@@ -432,6 +445,7 @@ export class Daemon {
       cwd: optionalText(req.cwd) ?? "",
       transcriptPath: optionalText(req.transcriptPath),
       entrypoint: optionalText(req.entrypoint),
+      claudePid: positiveInteger(req.claudePid),
     });
     const status = this.statusCode();
     let notice = false;
