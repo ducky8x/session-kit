@@ -17,6 +17,7 @@ export const REPLIES = {
   closedVs: "This session is closed. Open it in VS Code and it will pick this up.",
   waking: "The session is being woken up; it will see this once it's listening.",
   woke: "Woke the session in the background. It will answer here.",
+  savedForNextStart: "Couldn't wake the session now. Claude Code saved the message and gives it to the session when it next starts.",
   inboxFull: "The inbox was full, so the oldest waiting message was dropped.",
   controlHint: "Only `status` works here. Write in a session's channel to reach that session.",
 } as const;
@@ -176,6 +177,11 @@ export class Inbound {
     switch (outcome.kind) {
       case "started":
         reply = REPLIES.woke;
+        break;
+      // The CLI holds the wake prompt, with the message in it, until the session next starts: keeping the
+      // event as well would deliver it twice.
+      case "saved":
+        reply = REPLIES.savedForNextStart;
         break;
       case "interactive":
       case "busy":

@@ -35,6 +35,15 @@ export function parseBackgroundedId(stdout: string): string | null {
   return /backgrounded\s*[^\s\w]\s*([0-9a-f]{8})\b/i.exec(plain)?.[1]?.toLowerCase() ?? null;
 }
 
+/**
+ * Did the CLI refuse the wake but save the prompt for the session's next start? It does that, and says so,
+ * when its supervisor can't be reached or the folder isn't trusted, among other refusals. It never does it
+ * for a session that is already running.
+ */
+export function savedForNextStart(output: string): boolean {
+  return /your message is saved and will be delivered when session \S+ next starts/i.test(output);
+}
+
 /** Does a failed resume say the session does not exist? */
 export function looksNotFound(output: string): boolean {
   return /no conversation found|not found|no such session|unknown session|could(?: not|n't) find|does not exist|doesn't exist/i.test(
@@ -148,6 +157,8 @@ export type WakeOutcome =
   | { kind: "gone" }
   /** The CLI started a copy instead (the session was alive after all); the copy was stopped if it could be told. */
   | { kind: "copy" }
+  /** The CLI refused the wake but saved the prompt, which reaches the session when it next starts. */
+  | { kind: "saved" }
   | { kind: "failed"; reason: string }
   /** Another wake is running, or this session was woken less than a minute ago. */
   | { kind: "in_flight" }
@@ -320,6 +331,10 @@ export class Waker {
     }
     const output = `${scrub(result.stdout)}\n${scrub(result.stderr)}`;
     if (result.code !== 0) {
+      if (savedForNextStart(output)) {
+        this.d.log.warn(`waking session ${short} was refused (exit ${result.code}); the CLI saved the prompt for its next start`);
+        return { kind: "saved" };
+      }
       if (wasAbsent && looksNotFound(output)) {
         this.d.log.warn(`session ${short} does not exist any more`);
         return { kind: "gone" };

@@ -7,6 +7,7 @@ import {
   buildResumeCommand,
   parseBackgroundedId,
   presenceOf,
+  savedForNextStart,
   sessionStatus,
   wakePrompt,
 } from "../src/wake.ts";
@@ -41,6 +42,12 @@ describe("the wake command and prompt", () => {
   test("reads the short id when the CLI colors it", () => {
     const colored = "backgrounded · \u001b[36m0123abcd\u001b[39m · demo\n\u001b[2m  claude agents   list sessions\u001b[22m\n";
     expect(parseBackgroundedId(colored)).toBe("0123abcd");
+  });
+
+  test("tells a refused wake whose prompt the CLI saved from one that saved nothing", () => {
+    expect(savedForNextStart("Couldn't reach the service (not running). Your message is saved and will be delivered when session a1b2c3d4 next starts.\n")).toBe(true);
+    expect(savedForNextStart("Session a1b2c3d4 is already running — `claude attach a1b2c3d4` to join it\n")).toBe(false);
+    expect(savedForNextStart("error: no conversation found with session ID")).toBe(false);
   });
 });
 
@@ -194,6 +201,27 @@ describe("waking from a Discord message", () => {
     await k.say("hello");
     expect(k.replies()).toEqual([couldNotWake("exit 1")]);
     expect(k.daemon.sessions.get(k.sessionId)!.inbox.map((e) => e.text)).toEqual(["hello"]);
+  });
+
+  test("a refused wake whose prompt the CLI saved for the next start counts as delivered: the message isn't kept too", async () => {
+    const k = await inboundKit();
+    k.claude.addStopped(k.sessionId);
+    k.claude.refuseAndSave = "Couldn't reach the background service (not running).";
+    await k.say("please rerun the deploy");
+    expect(k.claude.savedPrompts).toEqual([wakePrompt("please rerun the deploy")]);
+    expect(k.daemon.sessions.get(k.sessionId)!.inbox).toEqual([]);
+    expect(k.replies()).toEqual([REPLIES.savedForNextStart]);
+    expect(REPLIES.savedForNextStart).toBe("Couldn't wake the session now. Claude Code saved the message and gives it to the session when it next starts.");
+  });
+
+  test("a wake refused because the session is already running saves nothing, so the message is kept once", async () => {
+    const k = await inboundKit();
+    k.claude.addStopped(k.sessionId);
+    k.claude.refuseRunning = true;
+    await k.say("hello");
+    expect(k.claude.savedPrompts).toEqual([]);
+    expect(k.daemon.sessions.get(k.sessionId)!.inbox.map((e) => e.text)).toEqual(["hello"]);
+    expect(k.replies()).toEqual([couldNotWake("exit 1")]);
   });
 
   test("the user's text never reaches the log", async () => {
