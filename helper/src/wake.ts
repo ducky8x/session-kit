@@ -16,10 +16,11 @@ export function wakePrompt(message: string): string {
 /**
  * Resume a session in the background under its own id, the prompt last. There is no other flag, ever: a
  * resume that carries one makes the CLI start a copy under a new id, because a session keeps the options it
- * was created with.
+ * was created with. The id goes in lowercase: the CLI continues a session in place only from its full id in
+ * lowercase, and starts a copy for anything else.
  */
 export function buildResumeCommand(o: { bin: string; sessionId: string; prompt: string }): string[] {
-  return [o.bin, "--bg", "--resume", o.sessionId, o.prompt];
+  return [o.bin, "--bg", "--resume", o.sessionId.toLowerCase(), o.prompt];
 }
 
 /** The short id a launch prints on its `backgrounded · <id>` line, or null when it printed none. */

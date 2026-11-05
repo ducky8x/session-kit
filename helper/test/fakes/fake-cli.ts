@@ -11,7 +11,8 @@ import { FakeProcessRunner } from "./fake-process.ts";
  *    `pid` (null once stopped). An interactive row has `pid`, `sessionId`, `kind: "interactive"`, `name`,
  *    `status` and no `id`. Without `--all` only live rows are listed.
  *  - `--bg --resume <id|sessionId> <prompt>` with NO other flag wakes a stopped session under its own id. On a
- *    session whose process is alive it starts a COPY under a new id. ANY extra flag also starts a copy.
+ *    session whose process is alive it starts a COPY under a new id. ANY extra flag also starts a copy, and so
+ *    does a session id that is not all lowercase.
  *  - `stop <id>` stops a background session (its pid becomes null).
  *
  * Nothing real is started. Every violation fails the test that caused it, when it ends.
@@ -224,15 +225,19 @@ export class FakeCli extends FakeProcessRunner {
       this.violations.push("--resume without an id");
       return this.fail(64, "error: --resume needs an id");
     }
-    let target = this.rows.find((r) => r.sessionId === ref || r.id === ref);
-    if (!target && this.closed.has(ref)) {
-      target = { sessionId: ref, kind: "background", cwd: cwd ?? "/", name: "demo", state: "done", status: null, pid: null };
+    const wanted = ref.toLowerCase();
+    let target = this.rows.find((r) => r.sessionId.toLowerCase() === wanted || r.id === ref);
+    const closed = [...this.closed].find((id) => id.toLowerCase() === wanted);
+    if (!target && closed !== undefined) {
+      target = { sessionId: closed, kind: "background", cwd: cwd ?? "/", name: "demo", state: "done", status: null, pid: null };
       this.rows.push(target);
     }
     if (!target) return this.fail(1, `${this.notFoundText}: ${ref}`);
     if (extra.length > 0) this.violations.push(`resume with extra flags: ${extra.join(" ")}`);
     const live = target.pid !== null;
-    if (live || extra.length > 0) {
+    // The real CLI continues a session in place only when given its full id in lowercase.
+    const unresolved = ref !== target.id && ref !== ref.toLowerCase();
+    if (live || extra.length > 0 || unresolved) {
       const copy: FakeRow = {
         id: this.shortId(),
         sessionId: this.uuid(),
