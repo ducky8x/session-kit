@@ -84,7 +84,7 @@ The session never asks for, sees, handles or types the bot token. The user paste
 
 ## After setup
 
-This session started before Discord was on, so it has no channel yet. Its first post creates one: send a short line, such as `~/.claude/session-kit/bin/sk-discord send --session <id> "Connected to Discord."`, then start the listener (see "The listener"). New sessions get their channel by themselves.
+This session started before Discord was on, so it has no channel yet. Its first post creates one: send a short line, such as `~/.claude/session-kit/bin/sk-discord send --session <id> "Connected to Discord."`, then start the listener (see "The listener"). New sessions get their channel by themselves, at their first prompt or post.
 
 ## In every session with Discord on
 
@@ -92,7 +92,7 @@ These rules hold in the main session for as long as Discord is on. A subagent do
 
 ### The listener
 
-When the session-start hook prints `Discord: #<channel> (<category>)` with a listener command, start the listener before other work:
+When the session-start hook prints a `Discord:` line with a listener command, start the listener before other work. The line is `Discord: #<channel> (<category>)`, or says the session has no channel yet: it gets one at its first prompt or post, so a session nobody uses never gets one. When Claude Code carries the chat over to a new session id (`/clear`, or moving it to the background), the new session keeps the channel.
 
 - Run `~/.claude/session-kit/bin/sk-discord listen --session <id>` as a background command (the Bash tool with `run_in_background`). Don't use Monitor: it expires after 30 minutes at most, and every expiry costs a turn.
 - The listener waits for one event, prints it as one JSON line and exits, so an idle session costs nothing. When its output arrives, handle the event, then start the listener again.
@@ -134,7 +134,7 @@ Each line from the listener is JSON with a `type`:
 - `checkin`: the helper posted its hourly check-in. These continue until a post with `--done`. You may add one short status line with `send`; nothing else is needed.
 - `disabled`: Discord was turned off. Stop listening and posting, don't start the listener again, and say so in one line at the keyboard.
 - `unlinked`: this session's channel is gone (deleted by hand, or removed after a month without messages). Don't start the listener again now. A later post creates a new channel; start the listener again after that post.
-- `replaced`: a newer listener for this session took over, for example one started after a summary of the chat. Don't start the listener again; the newer one is already running.
+- `replaced`: a newer listener for this session took over, for example one started after a summary of the chat or after `/clear`. Don't start the listener again; the newer one is already running.
 - `helper-down` (the listener exits with code 2): the helper isn't running. Start the listener once more. If it's down again, tell the user at the keyboard, with the fix `launchctl kickstart -k gui/$UID/io.github.ducky8x.session-kit.discord`, and start the listener again when they say it's back or `status` shows `connected`.
 
 ### Messages that arrive between listeners
