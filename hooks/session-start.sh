@@ -5,7 +5,8 @@
 # hook's plain stdout to the session's context. It prints the session id and
 # state file path, asks for the start skill on a new session, restates the
 # saved setup after a resume or a summary of the chat, and loads the user's
-# rules file. It also prunes old state files.
+# rules file. It also prunes old state files. At the end it passes its input
+# on to discord.sh and adds that hook's lines, if any.
 #
 # Needs only bash and POSIX tools. It must never fail the session, so every
 # path exits 0.
@@ -81,12 +82,24 @@ describe_setup() {
   printf 'Workflow: %s · Autonomous: %s' "$w" "$a"
 }
 
+# print_discord <hook input>: run discord.sh session-start with the same
+# input, and add what it prints after a blank line.
+print_discord() {
+  local hook out
+  hook="$(dirname "$0")/discord.sh"
+  [ -f "$hook" ] || return 0
+  out=$(printf '%s' "$1" | "${BASH:-bash}" "$hook" session-start 2>/dev/null)
+  [ -n "$out" ] || return 0
+  printf '\n%s\n' "$out"
+}
+
 main() {
-  local input="" sid source state_dir state_file
+  local raw="" input sid source state_dir state_file
   [ -n "${HOME:-}" ] || return 0
   if [ ! -t 0 ]; then
-    input=$(cat 2>/dev/null | tr '\n\r\t' '   ')
+    raw=$(cat 2>/dev/null)
   fi
+  input=$(printf '%s' "$raw" | tr '\n\r\t' '   ')
   sid=$(json_str "$input" session_id)
   source=$(json_str "$input" source)
   # The id becomes a file name: allow only safe characters.
@@ -129,6 +142,7 @@ main() {
   esac
 
   print_rules "$state_dir" "$sid"
+  print_discord "$raw"
 }
 
 main 2>/dev/null
