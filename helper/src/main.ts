@@ -3,6 +3,8 @@ import { homedir } from "node:os";
 import { type CallHelper, HelperError, NOT_RUNNING, callHelper } from "./client.ts";
 import { runDaemon } from "./run-daemon.ts";
 import { notificationHook } from "./hooks/notification.ts";
+import { stopHook } from "./hooks/stop.ts";
+import { listenCommand } from "./listen.ts";
 import { sessionEndHook } from "./hooks/session-end.ts";
 import { type HookDeps, sessionStartHook } from "./hooks/session-start.ts";
 import { pathsFor } from "./paths.ts";
@@ -54,6 +56,7 @@ export const HOOKS: Record<string, Hook> = {
   "session-start": sessionStartHook,
   "session-end": sessionEndHook,
   notification: notificationHook,
+  stop: stopHook,
 };
 
 /** How long `status` waits for the helper. */
@@ -88,6 +91,7 @@ export const USAGE = `sk-discord: the Discord helper for session-kit
 
   sk-discord send --session <id> [--ping] [--done] "<text>"
                                         post in the session's channel ("-" reads stdin)
+  sk-discord listen --session <id>      wait for one event for the session and print it as JSON
   sk-discord status [--json]            show what the helper is doing
   sk-discord daemon                     run the helper (the LaunchAgent starts it)
   sk-discord hook <event>               run a session hook (JSON on stdin)
@@ -106,6 +110,8 @@ export const COMMANDS: Record<string, Command> = {
       call: deps.call ?? callHelper,
     }),
   status: statusCommand,
+  listen: (args, deps) =>
+    listenCommand(args, { paths: pathsFor(deps.home), out: deps.out, err: deps.err, call: deps.call ?? callHelper }),
   daemon: (_args, deps) => (deps.runDaemon ? deps.runDaemon() : runDaemon({ home: deps.home, env: deps.env })),
   hook: async (args, deps) => {
     const hook = HOOKS[args[0] ?? ""];

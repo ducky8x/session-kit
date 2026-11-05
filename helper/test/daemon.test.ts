@@ -330,7 +330,7 @@ describe("reload", () => {
 
   test("an unknown op is refused with its name", async () => {
     const k = await daemonKit();
-    const error = await k.call({ op: "listen", sessionId: SID }).catch((e) => e);
+    const error = await k.call({ op: "frobnicate", sessionId: SID }).catch((e) => e);
     expect(error).toBeInstanceOf(HelperError);
     expect(error).toMatchObject({ code: "unknown-op" });
   });

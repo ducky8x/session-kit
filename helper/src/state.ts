@@ -106,6 +106,8 @@ export interface SessionEntry {
   wantsChannel: boolean;
   /** When the session's run was marked finished (`send --done`), which stops check-ins. */
   doneAt: number | null;
+  /** When the session last posted with `send`. */
+  lastSendAt: number | null;
 }
 
 export function newSession(o: {
@@ -133,6 +135,7 @@ export function newSession(o: {
     renamedAt: null,
     wantsChannel: false,
     doneAt: null,
+    lastSendAt: null,
   };
 }
 
@@ -169,6 +172,7 @@ function readEntry(sessionId: string, raw: unknown): SessionEntry | null {
     renamedAt: num(r.renamedAt),
     wantsChannel: r.wantsChannel === true,
     doneAt: num(r.doneAt),
+    lastSendAt: num(r.lastSendAt),
   };
 }
 
@@ -245,17 +249,43 @@ export class SessionStore {
     return gone.map((e) => e.sessionId);
   }
 
-  /** Queue an event for the session's next listener. Returns how many old events were dropped to make room. */
-  pushInbox(sessionId: string, event: InboxEvent): number {
+  /**
+   * Queue an event for the session's next listener (at the front: it came before what is already waiting).
+   * Returns how many old events were dropped to make room.
+   */
+  pushInbox(sessionId: string, event: InboxEvent, o: { front?: boolean } = {}): number {
     let dropped = 0;
     this.update(sessionId, (e) => {
-      e.inbox.push(event);
+      if (o.front) e.inbox.unshift(event);
+      else e.inbox.push(event);
       while (e.inbox.length > INBOX_LIMIT) {
         e.inbox.shift();
         dropped++;
       }
     });
     return dropped;
+  }
+
+  /** Take the oldest waiting event, if any. */
+  shiftInbox(sessionId: string): InboxEvent | undefined {
+    const entry = this.entries.get(sessionId);
+    if (!entry || entry.inbox.length === 0) return undefined;
+    let event: InboxEvent | undefined;
+    this.update(sessionId, (e) => {
+      event = e.inbox.shift();
+    });
+    return event;
+  }
+
+  /** Take every waiting event, oldest first. */
+  takeInbox(sessionId: string): InboxEvent[] {
+    const entry = this.entries.get(sessionId);
+    if (!entry || entry.inbox.length === 0) return [];
+    const events = entry.inbox;
+    this.update(sessionId, (e) => {
+      e.inbox = [];
+    });
+    return events;
   }
 
   private save(): void {

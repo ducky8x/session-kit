@@ -28,6 +28,10 @@ export interface DaemonDeps {
   WebSocket?: typeof WebSocket;
   random?: () => number;
   timing?: Timing;
+  /** Is this process id alive? Tests answer for the fake CLI's processes. */
+  pidAlive?: (pid: number) => boolean;
+  /** Finds a command on PATH (or on the PATH given). */
+  which?: (command: string, path?: string) => string | null;
   /** Features that add their own socket ops and hooks (see `extensions.ts`). */
   extensions?: readonly ((daemon: Daemon) => void)[];
 }
@@ -101,10 +105,13 @@ export class Daemon {
   private readonly sendListeners: ((event: SendEvent) => void)[] = [];
   private readonly postedListeners: ((event: PostedEvent) => void)[] = [];
   private readonly dispatchListeners: ((type: string, data: any) => void)[] = [];
+  private readonly configListeners: ((config: Config, before: Config) => void)[] = [];
+  private readonly unlinkedListeners: ((sessionId: string, why: "deleted" | "removed") => void)[] = [];
   private inboundChain: Promise<void> = Promise.resolve();
   private readonly background = new Set<Promise<unknown>>();
 
-  constructor(private readonly d: DaemonDeps) {
+  constructor(readonly deps: DaemonDeps) {
+    const d = deps;
     const { paths, clock, log } = d;
     this.config = loadConfig(paths);
     this.sessions = new SessionStore(paths);
@@ -133,6 +140,15 @@ export class Daemon {
       log,
       isOnline: () => this.gateway.state === "connected",
       timing: d.timing ?? timingFromEnv(d.env),
+      onUnlinked: (sessionId, why) => {
+        for (const listener of this.unlinkedListeners) {
+          try {
+            listener(sessionId, why);
+          } catch (error) {
+            log.warn(`an unlinked listener failed: ${(error as Error).message}`);
+          }
+        }
+      },
     });
     this.outbox = new Outbox({
       file: paths.outbox,
@@ -189,6 +205,16 @@ export class Daemon {
     this.postedListeners.push(listener);
   }
 
+  /** `config.json` was read again (`reload`); `before` is what it was. */
+  onConfigChange(listener: (config: Config, before: Config) => void): void {
+    this.configListeners.push(listener);
+  }
+
+  /** A session lost its channel (see `ChannelDeps.onUnlinked`). */
+  onUnlinked(listener: (sessionId: string, why: "deleted" | "removed") => void): void {
+    this.unlinkedListeners.push(listener);
+  }
+
   /** Every gateway event (op 0), before the daemon's own handling. */
   onGatewayEvent(listener: (type: string, data: any) => void): void {
     this.dispatchListeners.push(listener);
@@ -220,7 +246,7 @@ export class Daemon {
   /** Serve the socket, then connect if Discord is on. Throws AlreadyRunning when another daemon has the socket. */
   async start(): Promise<void> {
     await this.server.listen();
-    this.d.log.info(`started, version ${VERSION}`);
+    this.deps.log.info(`started, version ${VERSION}`);
     await this.applyConfig();
   }
 
@@ -233,7 +259,7 @@ export class Daemon {
   }
 
   private track(promise: Promise<unknown>): void {
-    const tracked = promise.catch((error) => this.d.log.warn(`background work failed: ${(error as Error).message}`));
+    const tracked = promise.catch((error) => this.deps.log.warn(`background work failed: ${(error as Error).message}`));
     this.background.add(tracked);
     void tracked.finally(() => this.background.delete(tracked));
   }
@@ -258,28 +284,36 @@ export class Daemon {
 
   /** Read `config.json` and the token again, and connect or disconnect to match. */
   async applyConfig(): Promise<void> {
-    this.config = loadConfig(this.d.paths);
+    const before = this.config;
+    this.config = loadConfig(this.deps.paths);
+    for (const listener of this.configListeners) {
+      try {
+        listener(this.config, before);
+      } catch (error) {
+        this.deps.log.warn(`a config listener failed: ${(error as Error).message}`);
+      }
+    }
     if (!this.config.enabled) {
       this.goQuiet();
       return;
     }
-    const before = this.token;
+    const previousToken = this.token;
     try {
-      this.token = await this.d.keychain.getToken();
+      this.token = await this.deps.keychain.getToken();
     } catch (error) {
-      this.d.log.warn(`could not read the bot token: ${(error as Error).message}`);
+      this.deps.log.warn(`could not read the bot token: ${(error as Error).message}`);
       this.token = null;
     }
     if (this.token === null) {
       this.goQuiet();
       return;
     }
-    const logger = this.d.log as Logger & { addSecret?: (secret: string) => void };
+    const logger = this.deps.log as Logger & { addSecret?: (secret: string) => void };
     logger.addSecret?.(this.token);
     this.names.start();
     this.channels.startSweeper();
     const state = this.gateway.state;
-    if (this.token !== before || (state !== "connected" && state !== "connecting")) {
+    if (this.token !== previousToken || (state !== "connected" && state !== "connecting")) {
       this.gateway.stop();
       this.gateway.start();
     }
@@ -313,7 +347,7 @@ export class Daemon {
   // ---- the gateway ------------------------------------------------------------------------------
 
   private onGatewayState(state: GatewayState): void {
-    this.d.log.info(`gateway ${state}`);
+    this.deps.log.info(`gateway ${state}`);
     this.outbox.setOnline(state === "connected");
   }
 
@@ -322,7 +356,7 @@ export class Daemon {
       try {
         listener(type, data);
       } catch (error) {
-        this.d.log.warn(`a ${type} listener failed: ${(error as Error).message}`);
+        this.deps.log.warn(`a ${type} listener failed: ${(error as Error).message}`);
       }
     }
     const guildId = this.config.guildId;
@@ -331,7 +365,7 @@ export class Daemon {
         this.botId = typeof data?.user?.id === "string" ? data.user.id : null;
         if (guildId !== null && Array.isArray(data?.guilds)) {
           this.notInServer = !data.guilds.some((g: { id?: unknown }) => g?.id === guildId);
-          if (this.notInServer) this.d.log.warn("the bot is not in the configured server");
+          if (this.notInServer) this.deps.log.warn("the bot is not in the configured server");
         }
         this.track(this.channels.onConnected());
         return;
@@ -342,7 +376,7 @@ export class Daemon {
       case "GUILD_DELETE":
         if (data?.id === guildId && data?.unavailable !== true) {
           this.notInServer = true;
-          this.d.log.warn("the bot was removed from the configured server");
+          this.deps.log.warn("the bot was removed from the configured server");
         }
         return;
       case "CHANNEL_CREATE":
@@ -355,7 +389,7 @@ export class Daemon {
         const message = data as DiscordMessage;
         this.inboundChain = this.inboundChain
           .then(() => this.onMessage(message))
-          .catch((error) => this.d.log.warn(`handling a message failed: ${(error as Error).message}`));
+          .catch((error) => this.deps.log.warn(`handling a message failed: ${(error as Error).message}`));
         return;
       }
     }
@@ -431,16 +465,15 @@ export class Daemon {
     const ping = req.ping === true;
     const done = req.done === true;
     const pieces = this.post(sessionId, body, { ping });
-    if (done) {
-      this.sessions.update(sessionId, (e) => {
-        e.doneAt = this.d.clock.now();
-      });
-    }
+    this.sessions.update(sessionId, (e) => {
+      e.lastSendAt = this.deps.clock.now();
+      if (done) e.doneAt = this.deps.clock.now();
+    });
     for (const listener of this.sendListeners) {
       try {
         listener({ sessionId, text: body, ping, done });
       } catch (error) {
-        this.d.log.warn(`a send listener failed: ${(error as Error).message}`);
+        this.deps.log.warn(`a send listener failed: ${(error as Error).message}`);
       }
     }
     return { queued: pieces, online: this.gateway.state === "connected" };

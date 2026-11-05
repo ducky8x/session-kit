@@ -26,6 +26,10 @@ export interface DaemonKitOptions {
   enabled?: boolean;
   /** null: no token in the keychain. */
   token?: string | null;
+  /** The process runner (a FakeCli for wake tests). Defaults to one that answers `claude agents --json` with []. */
+  runner?: FakeProcessRunner;
+  /** Is this process id alive? (The fake CLI's `pidAlive`.) */
+  pidAlive?: (pid: number) => boolean;
   /** Leave the server out of config.json (setup not finished). */
   noGuild?: boolean;
   /** Don't start the daemon yet. */
@@ -40,6 +44,8 @@ export interface DaemonKitOptions {
 export async function daemonKit(o: DaemonKitOptions = {}) {
   const rest = await FakeDiscordRest.start();
   const gateway = await FakeGateway.start();
+  // Tests move the clock by hours; a heartbeat every 41 seconds would race the real socket's ACKs.
+  gateway.heartbeatInterval = 7 * 24 * 3_600_000;
   cleanups.push(() => rest.stop(), () => gateway.stop());
   const categories = {
     desktop: rest.addCategory("Desktop"),
@@ -67,7 +73,7 @@ export async function daemonKit(o: DaemonKitOptions = {}) {
   };
   saveConfig(paths, config);
   const keychain = new MemoryKeychain(o.token === undefined ? TOKEN : o.token);
-  const runner = new FakeProcessRunner().answer(["/opt/tools/claude", "agents", "--json"], { stdout: "[]" });
+  const runner = o.runner ?? new FakeProcessRunner().answer(["/opt/tools/claude", "agents", "--json"], { stdout: "[]" });
   const clock = new FakeClock();
   const log = memoryLogger();
   const daemon = new Daemon({
@@ -80,6 +86,8 @@ export async function daemonKit(o: DaemonKitOptions = {}) {
     restBaseUrl: rest.baseUrl,
     gatewayUrl: gateway.url,
     random: () => 0.5,
+    pidAlive: o.pidAlive ?? (() => false),
+    which: () => null,
     extensions: EXTENSIONS,
   });
   cleanups.push(() => daemon.stop());
