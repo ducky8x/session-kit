@@ -10,7 +10,9 @@ import { AlreadyRunning } from "../src/server.ts";
 import { MemoryKeychain } from "./fakes/fake-keychain.ts";
 import { FakeProcessRunner } from "./fakes/fake-process.ts";
 import { GUILD_ID, OWNER_ID } from "./fakes/fake-rest.ts";
+import { sessionFeatures } from "../src/features.ts";
 import { SID, daemonKit } from "./helpers/daemon-kit.ts";
+import { transcripts } from "./helpers/transcripts.ts";
 import { waitFor } from "./helpers/wait.ts";
 
 function ownerMessage(channelId: string, content = "hello", authorId = OWNER_ID): DiscordMessage {
@@ -409,5 +411,46 @@ describe("sk-discord daemon", () => {
     });
     expect(ran).toBe(true);
     expect(code).toBe(0);
+  });
+});
+
+describe("one chat, one channel", () => {
+  const A = "aaaa1111-0000-4000-8000-000000000001";
+  const B = "bbbb2222-0000-4000-8000-000000000002";
+  const C = "cccc3333-0000-4000-8000-000000000003";
+
+  test("a chat moved to the background, the session that continues it and a spare session share one channel", async () => {
+    const k = await daemonKit();
+    await k.connected();
+    const t = transcripts();
+    const register = (sessionId: string, source: string, transcriptPath: string, claudePid: number) =>
+      k.call({ op: "register", sessionId, source, cwd: "/work/home", transcriptPath, entrypoint: "cli", claudePid });
+    await register(A, "startup", t.chat(A), 100);
+    await k.call({ op: "stop-hook", sessionId: A });
+    await waitFor(() => k.daemon.sessions.get(A)?.channelId != null);
+    const channelId = k.daemon.sessions.get(A)!.channelId!;
+    const listener = k.call({ op: "listen", sessionId: A });
+    await waitFor(() => sessionFeatures(k.daemon).hub.isListening(A));
+
+    t.continuedIn(A, B);
+    expect(await register(C, "startup", t.pathOf(C), 300)).toMatchObject({ linked: false });
+    expect(await register(B, "fork", t.pathOf(B), 200)).toMatchObject({ linked: true });
+    expect((await listener).event).toEqual({ type: "replaced" });
+    expect((await k.call({ op: "listen", sessionId: A })).event).toEqual({ type: "replaced" });
+    for (const id of [B, C, A]) await k.call({ op: "ended", sessionId: id, reason: "other" });
+
+    const seen: (string | null)[] = [];
+    k.daemon.onInbound((_message, session) => void seen.push(session?.sessionId ?? null));
+    k.gateway.dispatch("MESSAGE_CREATE", ownerMessage(channelId, "still there?"));
+    await waitFor(() => seen.length === 1);
+    expect(seen).toEqual([B]);
+
+    await k.clock.advance(5000);
+    k.daemon.post(A, "a post addressed to the earlier session");
+    await k.daemon.settle();
+    expect(k.rest.posted(channelId).map((m) => m.content)).toContain("a post addressed to the earlier session");
+    expect(k.daemon.sessions.get(B)!.lastMessageAt).toBe(k.clock.now());
+    const made = k.rest.requests.filter((r) => r.method === "POST" && r.path === `/guilds/${GUILD_ID}/channels` && r.body?.type === 0);
+    expect(made).toHaveLength(1);
   });
 });

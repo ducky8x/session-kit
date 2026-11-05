@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { RENAME_SPACING_MS, SERVER_SOFT_LIMIT } from "../src/channels.ts";
-import { GUILD_ID } from "./fakes/fake-rest.ts";
+import { BOT_ID, GUILD_ID, OWNER_ID } from "./fakes/fake-rest.ts";
 import { type ChannelKit, SID, channelKit } from "./helpers/channel-kit.ts";
+import { transcripts } from "./helpers/transcripts.ts";
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
@@ -312,5 +313,177 @@ describe("categories and the server limit", () => {
     expect(after.map((r) => `${r.method} ${r.path}`)).toEqual([`DELETE /channels/${oldest}`, `POST /guilds/${GUILD_ID}/channels`]);
     expect(k.sessions.get("old10000")).toBeUndefined();
     expect(k.sessions.get("old20000")?.channelId).toBe(newer);
+  });
+});
+
+describe("continuations", () => {
+  const A = "aaaa1111-0000-4000-8000-000000000001";
+  const B = "bbbb2222-0000-4000-8000-000000000002";
+  const C = "cccc3333-0000-4000-8000-000000000003";
+  const channelPosts = (k: ChannelKit) => k.fake.requestsMatching("POST", `/guilds/${GUILD_ID}/channels`);
+
+  function cli(sessionId: string, source: string, transcriptPath: string | null, claudePid: number | null) {
+    return { sessionId, source, cwd: "/work/home", transcriptPath, entrypoint: "cli", claudePid };
+  }
+
+  test("a chat moved to the background keeps one channel; the spare session gets none", async () => {
+    const k = await channelKit();
+    const t = transcripts();
+    await k.channels.reconcile();
+    await k.channels.register(cli(A, "startup", t.chat(A), 100));
+    k.channels.activate(A);
+    await k.channels.settle();
+    const channelId = k.sessions.get(A)!.channelId!;
+    k.channels.applyNames(new Map([[A, "Plan the trip"]]));
+    await k.channels.settle();
+    expect(k.fake.channels.get(channelId)!.name).toBe("plan-the-trip-cli");
+
+    // The chat moves to a background session (B); the background service also starts a spare session (C).
+    await k.clock.advance(2 * MINUTE);
+    t.continuedIn(A, B);
+    const spare = await k.channels.register(cli(C, "startup", t.pathOf(C), 300));
+    const moved = await k.channels.register(cli(B, "fork", t.pathOf(B), 200));
+    expect(spare).toMatchObject({ linked: false });
+    expect(moved).toEqual({ registered: true, channelName: "plan-the-trip-cli", category: "CLI", pending: false, linked: true });
+    expect(k.sessions.get(B)!.channelId).toBe(channelId);
+    expect(k.sessions.get(A)).toMatchObject({ channelId: null, movedTo: B });
+    expect(k.sessions.get(C)!.channelId).toBeNull();
+
+    for (const id of [B, C, A]) k.channels.ended(id);
+    await k.channels.settle();
+    expect(channelPosts(k)).toHaveLength(1);
+    expect(k.channels.takenNames("")).toEqual(new Set(["plan-the-trip-cli"]));
+  });
+
+  test("the channel keeps its name until the new session has one, then takes that name and topic", async () => {
+    const k = await channelKit();
+    const t = transcripts();
+    await k.channels.reconcile();
+    await k.channels.register(cli(A, "startup", t.chat(A), 100));
+    await k.channels.ensureChannel(A);
+    const channelId = k.sessions.get(A)!.channelId!;
+    k.channels.applyNames(new Map([[A, "Plan the trip"]]));
+    await k.channels.settle();
+    t.continuedIn(A, B);
+    await k.channels.register(cli(B, "fork", t.pathOf(B), 200));
+    k.channels.applyNames(new Map([[B, "New session"]]));
+    await k.channels.settle();
+    const renames = () => k.fake.requestsMatching("PATCH", `/channels/${channelId}`).map((r) => r.body);
+    expect(renames()).toHaveLength(1);
+
+    k.channels.applyNames(new Map([[B, "Pack the bags"]]));
+    await k.channels.settle();
+    await k.clock.advance(RENAME_SPACING_MS);
+    await k.channels.settle();
+    expect(renames()[1]).toEqual({ name: "pack-the-bags-cli", topic: `session ${B} · cli · home` });
+    expect(k.sessions.get(B)!.channelName).toBe("pack-the-bags-cli");
+  });
+
+  test("a record written after the new session started is found at its first prompt or post", async () => {
+    const k = await channelKit();
+    const t = transcripts();
+    await k.channels.reconcile();
+    await k.channels.register(cli(A, "startup", t.chat(A), 100));
+    await k.channels.ensureChannel(A);
+    const channelId = k.sessions.get(A)!.channelId!;
+    expect(await k.channels.register(cli(B, "fork", t.pathOf(B), 200))).toMatchObject({ linked: false });
+    t.continuedIn(A, B);
+    k.channels.activate(B);
+    await k.channels.settle();
+    expect(k.sessions.get(B)!.channelId).toBe(channelId);
+    expect(channelPosts(k)).toHaveLength(1);
+  });
+
+  test("an owner message in the earlier session's channel goes to the session that continued the chat", async () => {
+    const k = await channelKit();
+    const t = transcripts();
+    await k.channels.reconcile();
+    await k.channels.register(cli(A, "startup", t.chat(A), 100));
+    await k.channels.ensureChannel(A);
+    const channelId = k.sessions.get(A)!.channelId!;
+    await k.channels.register(cli(B, "fork", t.pathOf(B), 200));
+    t.continuedIn(A, B);
+    const who = { ownerId: OWNER_ID, botId: BOT_ID };
+    const session = await k.channels.noteMessage({ channel_id: channelId, author: { id: OWNER_ID } }, who);
+    expect(session?.sessionId).toBe(B);
+    expect(k.sessions.byChannel(channelId)?.sessionId).toBe(B);
+  });
+
+  test("a chat resumed after it moved on keeps its own channel", async () => {
+    const k = await channelKit();
+    const t = transcripts();
+    await k.channels.reconcile();
+    await k.channels.register(cli(A, "startup", t.chat(A), 100));
+    await k.channels.ensureChannel(A);
+    t.continuedIn(A, B);
+    await k.channels.register(cli(B, "fork", t.pathOf(B), 200));
+    k.channels.ended(B);
+    k.sessions.unlink(B);
+    // The earlier chat is resumed and goes on; a message in its new channel stays with it.
+    await k.channels.register(cli(A, "resume", t.turn(A), 400));
+    const fresh = await k.channels.ensureChannel(A);
+    expect(fresh).not.toBeNull();
+    const who = { ownerId: OWNER_ID, botId: BOT_ID };
+    expect((await k.channels.noteMessage({ channel_id: fresh!, author: { id: OWNER_ID } }, who))?.sessionId).toBe(A);
+    expect(k.sessions.get(B)!.channelId).toBeNull();
+  });
+
+  test("messages waiting for the earlier session move with the channel, and its posts land there", async () => {
+    const k = await channelKit();
+    const t = transcripts();
+    await k.channels.reconcile();
+    await k.channels.register(cli(A, "startup", t.chat(A), 100));
+    await k.channels.ensureChannel(A);
+    const channelId = k.sessions.get(A)!.channelId!;
+    k.sessions.pushInbox(A, { type: "text", id: "1", text: "waiting", at: 0 });
+    t.continuedIn(A, B);
+    await k.channels.register(cli(B, "fork", t.pathOf(B), 200));
+    expect(k.sessions.get(B)!.inbox).toEqual([{ type: "text", id: "1", text: "waiting", at: 0 }]);
+    expect(k.sessions.get(A)!.inbox).toEqual([]);
+    expect(await k.channels.ensureChannel(A)).toBe(channelId);
+    expect(channelPosts(k)).toHaveLength(1);
+  });
+
+  test("/clear: a new session id from the same Claude Code process takes over the channel", async () => {
+    const k = await channelKit();
+    await k.channels.reconcile();
+    await k.channels.register({ ...startup(A, "claude-desktop"), claudePid: 4242 });
+    await k.channels.ensureChannel(A);
+    const channelId = k.sessions.get(A)!.channelId!;
+    k.channels.ended(A);
+    const cleared = await k.channels.register({ ...startup(B, "claude-desktop", "clear"), claudePid: 4242 });
+    expect(cleared).toMatchObject({ channelName: "session-kit-aaaa-desktop", linked: true });
+    expect(k.sessions.get(B)!.channelId).toBe(channelId);
+    expect(k.sessions.get(A)!.movedTo).toBe(B);
+    // The unnamed new session keeps the channel's name: nothing is renamed.
+    await k.channels.settle();
+    expect(k.fake.requestsMatching("PATCH", `/channels/${channelId}`)).toHaveLength(0);
+  });
+
+  test("the same process resuming another chat, or starting long after, is not a continuation", async () => {
+    const k = await channelKit();
+    await k.channels.reconcile();
+    await k.channels.register({ ...startup(A, "claude-desktop"), claudePid: 4242 });
+    await k.channels.ensureChannel(A);
+    k.channels.ended(A);
+    expect(await k.channels.register({ ...startup(B, "claude-desktop", "resume"), claudePid: 4242 })).toMatchObject({ linked: false });
+    expect(await k.channels.register({ ...startup(C, "claude-desktop", "startup"), claudePid: 4242 })).toMatchObject({ linked: false });
+    await k.clock.advance(11 * MINUTE);
+    const late = "dddd4444-0000-4000-8000-000000000004";
+    expect(await k.channels.register({ ...startup(late, "claude-desktop", "clear"), claudePid: 4242 })).toMatchObject({ linked: false });
+    expect(k.sessions.get(A)!.channelId).not.toBeNull();
+  });
+
+  test("a fork that keeps the original running gets a channel of its own", async () => {
+    const k = await channelKit();
+    const t = transcripts();
+    await k.channels.reconcile();
+    await k.channels.register(cli(A, "startup", t.chat(A), 100));
+    await k.channels.ensureChannel(A);
+    await k.channels.register(cli(B, "fork", t.pathOf(B), 200));
+    k.channels.activate(B);
+    await k.channels.settle();
+    expect(channelPosts(k)).toHaveLength(2);
+    expect(k.sessions.get(A)!.channelId).not.toBe(k.sessions.get(B)!.channelId);
   });
 });

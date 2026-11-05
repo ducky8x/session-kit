@@ -53,8 +53,9 @@ export function installSessionFeatures(daemon: Daemon): SessionFeatures {
   daemon.onConfigChange((config, before) => {
     if (before.enabled && !config.enabled) hub.disableAll();
   });
-  daemon.onUnlinked((sessionId) => {
-    hub.offer(sessionId, { type: "unlinked" });
+  daemon.onUnlinked((sessionId, why) => {
+    // A session whose chat moved on has a newer session listening in its place.
+    hub.offer(sessionId, { type: why === "moved" ? "replaced" : "unlinked" });
   });
 
   daemon.handlers
@@ -62,7 +63,9 @@ export function installSessionFeatures(daemon: Daemon): SessionFeatures {
       const sessionId = sessionIdOf(req.sessionId);
       if (!daemon.currentConfig().enabled) return { event: { type: "disabled" } };
       // A session listens from the start, before its chat (and so its channel) gets under way.
-      if (!daemon.sessions.get(sessionId)) return { event: { type: "unlinked" } };
+      const entry = daemon.sessions.get(sessionId);
+      if (!entry) return { event: { type: "unlinked" } };
+      if (entry.movedTo !== null) return { event: { type: "replaced" } };
       const waiting = daemon.sessions.shiftInbox(sessionId);
       if (waiting) return { event: { ...waiting, queued: true } };
       return new Promise((resolve) => {

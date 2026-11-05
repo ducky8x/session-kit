@@ -108,6 +108,13 @@ export interface SessionEntry {
   doneAt: number | null;
   /** When the session last posted with `send`. */
   lastSendAt: number | null;
+  /**
+   * The Claude Code process the session last started in (`CLAUDE_PID` in the hooks' environment), or null when
+   * the hook didn't say. A new session id in the same process (`/clear`) carries on the same chat.
+   */
+  claudePid: number | null;
+  /** The session that continued this chat and took over its channel, or null. */
+  movedTo: string | null;
 }
 
 export function newSession(o: {
@@ -136,6 +143,8 @@ export function newSession(o: {
     wantsChannel: false,
     doneAt: null,
     lastSendAt: null,
+    claudePid: null,
+    movedTo: null,
   };
 }
 
@@ -173,6 +182,8 @@ function readEntry(sessionId: string, raw: unknown): SessionEntry | null {
     wantsChannel: r.wantsChannel === true,
     doneAt: num(r.doneAt),
     lastSendAt: num(r.lastSendAt),
+    claudePid: num(r.claudePid),
+    movedTo: str(r.movedTo),
   };
 }
 

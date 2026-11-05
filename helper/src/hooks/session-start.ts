@@ -14,6 +14,16 @@ export const LISTENER_HINT = "Start it as a background command now, and again af
 /** The first line for a session whose chat (and so its channel) hasn't started yet. */
 export const NO_CHANNEL_YET = "Discord: no channel yet. This session gets one at its first prompt or post.";
 
+/**
+ * The Claude Code process from `CLAUDE_PID`, which Claude Code sets for every hook it runs, or null. A new
+ * session id from the same process (`/clear`) keeps the earlier session's channel.
+ */
+export function processId(value: string | undefined): number | null {
+  if (value === undefined || !/^[0-9]+$/.test(value)) return null;
+  const pid = Number(value);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
 /** The listener command, written with `~` so it reads the same on every machine. */
 export function listenerCommand(sessionId: string): string {
   return `~/.claude/session-kit/bin/sk-discord listen --session ${sessionId}`;
@@ -62,6 +72,7 @@ export async function sessionStartHook(deps: HookDeps): Promise<number> {
         cwd: stringField(input, "cwd") ?? "",
         transcriptPath: stringField(input, "transcript_path"),
         entrypoint: entrypoint ?? null,
+        claudePid: processId(deps.env.CLAUDE_PID),
       },
       { timeoutMs: deps.timeoutMs ?? REGISTER_TIMEOUT_MS },
     );

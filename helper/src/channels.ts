@@ -3,8 +3,9 @@ import type { Clock, TimerHandle } from "./clock.ts";
 import { type Config, loadConfig, updateConfig } from "./config.ts";
 import { RestError, type RestClient, UNKNOWN_CHANNEL } from "./discord/rest.ts";
 import type { Logger } from "./log.ts";
+import { readTailLines } from "./names.ts";
 import type { Paths } from "./paths.ts";
-import { type SessionEntry, type SessionStore, type Surface, newSession } from "./state.ts";
+import { INBOX_LIMIT, type SessionEntry, type SessionStore, type Surface, newSession } from "./state.ts";
 
 export const MINUTE_MS = 60_000;
 export const HOUR_MS = 60 * MINUTE_MS;
@@ -17,6 +18,11 @@ export const CATEGORY_LIMIT = 50;
 export const SERVER_SOFT_LIMIT = 490;
 /** Discord allows two renames per channel per 10 minutes; the helper renames at most once per 5. */
 export const RENAME_SPACING_MS = 5 * MINUTE_MS;
+/**
+ * A session that ended more than this long before another one started can't be the chat that one continues.
+ * (`/clear` ends the old session id just before the new one starts.)
+ */
+export const CONTINUATION_WINDOW_MS = 10 * MINUTE_MS;
 
 export const SURFACE_INFO: Record<Surface, { suffix: string; category: string }> = {
   desktop: { suffix: "desktop", category: "Desktop" },
@@ -133,6 +139,8 @@ export interface RegisterInput {
   transcriptPath: string | null;
   /** `CLAUDE_CODE_ENTRYPOINT`. */
   entrypoint: string | null | undefined;
+  /** The Claude Code process (`CLAUDE_PID`), when the hook knows it. */
+  claudePid?: number | null;
 }
 
 export interface RegisterResult {
@@ -147,6 +155,8 @@ export interface RegisterResult {
   linked: boolean;
 }
 
+export type UnlinkReason = "deleted" | "removed" | "moved";
+
 export interface ChannelDeps {
   rest: RestClient;
   sessions: SessionStore;
@@ -156,8 +166,11 @@ export interface ChannelDeps {
   /** The gateway is connected, so Discord is reachable. */
   isOnline(): boolean;
   timing?: Timing;
-  /** A session lost its channel: deleted by hand or by Discord (`deleted`), or removed with its entry (`removed`). */
-  onUnlinked?(sessionId: string, why: "deleted" | "removed"): void;
+  /**
+   * A session lost its channel: deleted by hand or by Discord (`deleted`), removed with its entry (`removed`),
+   * or handed on to the session that continued its chat (`moved`).
+   */
+  onUnlinked?(sessionId: string, why: UnlinkReason): void;
 }
 
 function asChannel(raw: unknown): GuildChannel | null {
@@ -224,6 +237,18 @@ export class ChannelManager {
   /** Resolves once nothing the manager started is still running (renames, sweeps, creations). */
   async settle(): Promise<void> {
     while (this.inflight.size > 0) await Promise.allSettled([...this.inflight]);
+  }
+
+  /** Wait for `promise`, but at most `ms`. */
+  private within(promise: Promise<unknown>, ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = this.d.clock.setTimeout(resolve, ms);
+      const done = () => {
+        this.d.clock.clearTimeout(timer);
+        resolve();
+      };
+      promise.then(done, done);
+    });
   }
 
   private childCount(categoryId: string): number {
@@ -373,7 +398,8 @@ export class ChannelManager {
 
   /**
    * A session started (SessionStart). It is recorded, but its channel waits until its chat starts (see
-   * `activate`), so a session that never gets a prompt never gets a channel. `resume` keeps the channel it
+   * `activate`), so a session that never gets a prompt never gets a channel. A session that continues an
+   * earlier one's chat takes over that channel at once (see `continueChat`). `resume` keeps the channel it
    * had; `compact` changes nothing. Non-interactive entry points get nothing.
    */
   async register(input: RegisterInput): Promise<RegisterResult> {
@@ -395,10 +421,130 @@ export class ChannelManager {
     }
     this.d.sessions.update(input.sessionId, (e) => {
       e.closedAt = null;
+      e.movedTo = null;
       if (input.cwd !== "") e.cwd = input.cwd;
       if (input.transcriptPath !== null) e.transcriptPath = input.transcriptPath;
+      if (input.claudePid !== undefined && input.claudePid !== null) e.claudePid = input.claudePid;
     });
+    if (this.d.sessions.get(input.sessionId)!.channelId === null) {
+      const work = this.exclusive(() => this.continueChat(input.sessionId, input.source)).catch((error) => {
+        const id = input.sessionId.slice(0, 8);
+        this.d.log.warn(`could not look for the chat session ${id} continues: ${(error as Error).message}`);
+      });
+      await this.within(work, this.timing.registerWaitMs);
+    }
     return this.describe(input.sessionId);
+  }
+
+  // ---- continued chats ---------------------------------------------------------------
+
+  /**
+   * Inside `exclusive`: when the session has no channel and carries on an earlier session's chat, give it that
+   * session's channel. `source` is SessionStart's, or null when the session is past its start.
+   */
+  private async continueChat(sessionId: string, source: string | null): Promise<void> {
+    const entry = this.d.sessions.get(sessionId);
+    if (!entry || entry.channelId !== null) return;
+    let earlier = source === null ? null : this.sameProcess(entry, source);
+    let why = "same process";
+    if (!earlier) {
+      earlier = await this.continuedFrom(entry);
+      why = "continued-in";
+    }
+    if (!earlier) return;
+    const to = this.d.sessions.get(sessionId);
+    const from = this.d.sessions.get(earlier.sessionId);
+    if (to?.channelId === null && from && from.channelId !== null) this.takeOver(from, to, why);
+  }
+
+  /**
+   * The session the same Claude Code process ran just before this one, which this one carries on: `/clear`,
+   * or any other new session id in that process. A resumed chat is a chat of its own.
+   */
+  private sameProcess(entry: SessionEntry, source: string): SessionEntry | null {
+    if (entry.claudePid === null || source === "startup" || source === "resume") return null;
+    const now = this.d.clock.now();
+    const found = this.d.sessions
+      .all()
+      .filter(
+        (e) =>
+          e.sessionId !== entry.sessionId &&
+          e.channelId !== null &&
+          e.claudePid === entry.claudePid &&
+          e.closedAt !== null &&
+          now - e.closedAt <= CONTINUATION_WINDOW_MS,
+      )
+      .sort((a, b) => b.closedAt! - a.closedAt!);
+    return found[0] ?? null;
+  }
+
+  /**
+   * The session whose transcript says its chat went on in this one: Claude Code writes a `continued-in` record
+   * when it moves a chat to a background session with a new id. Only sessions that were open when this one
+   * started are read.
+   */
+  private async continuedFrom(entry: SessionEntry): Promise<SessionEntry | null> {
+    const since = entry.createdAt - CONTINUATION_WINDOW_MS;
+    const candidates = this.d.sessions
+      .all()
+      .filter(
+        (e) =>
+          e.sessionId !== entry.sessionId &&
+          e.channelId !== null &&
+          e.transcriptPath !== null &&
+          e.createdAt <= entry.createdAt &&
+          (e.closedAt === null || e.closedAt >= since),
+      )
+      .sort((a, b) => b.createdAt - a.createdAt);
+    for (const candidate of candidates) {
+      if ((await continuedIn(candidate.transcriptPath!)).includes(entry.sessionId)) return candidate;
+    }
+    return null;
+  }
+
+  /**
+   * Inside `exclusive`: the channel, its name and the waiting messages move from `from` to `to`, the session that
+   * continues its chat.
+   */
+  private takeOver(from: SessionEntry, to: SessionEntry, why: string): void {
+    const channelId = from.channelId;
+    const carried = from.inbox;
+    this.cancelRename(from.sessionId);
+    this.d.sessions.update(to.sessionId, (e) => {
+      e.channelId = channelId;
+      e.channelName = from.channelName;
+      e.archived = from.archived;
+      e.renamedAt = from.renamedAt;
+      e.wantsChannel = false;
+      e.lastMessageAt = this.d.clock.now();
+      e.inbox = [...carried, ...e.inbox].slice(-INBOX_LIMIT);
+    });
+    this.d.sessions.update(from.sessionId, (e) => {
+      e.channelId = null;
+      e.channelName = null;
+      e.archived = false;
+      e.renamedAt = null;
+      e.wantsChannel = false;
+      e.inbox = [];
+      e.movedTo = to.sessionId;
+    });
+    const [toId, fromId] = [to.sessionId.slice(0, 8), from.sessionId.slice(0, 8)];
+    this.d.log.info(`session ${toId} continues session ${fromId} (${why}) and takes over channel ${channelId}`);
+    this.d.onUnlinked?.(from.sessionId, "moved");
+    this.requestRename(to.sessionId);
+  }
+
+  /** The session that has the chat now: this one, or the one it moved to (and so on). */
+  private current(sessionId: string): SessionEntry | undefined {
+    let entry = this.d.sessions.get(sessionId);
+    const seen = new Set<string>();
+    while (entry?.movedTo && !seen.has(entry.sessionId)) {
+      seen.add(entry.sessionId);
+      const next = this.d.sessions.get(entry.movedTo);
+      if (!next) break;
+      entry = next;
+    }
+    return entry;
   }
 
   /**
@@ -430,20 +576,27 @@ export class ChannelManager {
     });
   }
 
-  /** The session's channel, made if it has none and moved out of Archive if it is there. Null: no such session. */
+  /**
+   * The session's channel, made if it has none and moved out of Archive if it is there. A session whose chat
+   * moved on uses the channel of the session that has it now, and a session that continues an earlier one's
+   * chat takes over its channel. Null: no such session.
+   */
   ensureChannel(sessionId: string): Promise<string | null> {
     return this.exclusive(async () => {
       await this.ready();
-      const entry = this.d.sessions.get(sessionId);
-      if (!entry) return null;
+      const found = this.current(sessionId);
+      if (!found) return null;
+      const id = found.sessionId;
+      if (found.channelId === null) await this.continueChat(id, null);
+      const entry = this.d.sessions.get(id)!;
       if (entry.channelId === null) return this.create(entry);
       if (entry.archived) await this.move(entry, false);
       if (entry.wantsChannel) {
-        this.d.sessions.update(sessionId, (e) => {
+        this.d.sessions.update(id, (e) => {
           e.wantsChannel = false;
         });
       }
-      return this.d.sessions.get(sessionId)?.channelId ?? null;
+      return this.d.sessions.get(id)?.channelId ?? null;
     });
   }
 
@@ -462,17 +615,35 @@ export class ChannelManager {
    * the channel is one) once that is done, so the message can then be handed on.
    */
   async noteMessage(message: ChannelMessage, who: { ownerId: string | null; botId: string | null }): Promise<SessionEntry | null> {
-    const entry = this.d.sessions.byChannel(message.channel_id);
+    let entry = this.d.sessions.byChannel(message.channel_id);
     if (!entry) return null;
     const author = message.author?.id;
     const fromOwner = author !== undefined && author === who.ownerId;
     const fromBot = author !== undefined && author === who.botId;
     if (!fromOwner && !fromBot) return entry;
+    if (fromOwner) entry = await this.followChat(entry);
     this.d.sessions.update(entry.sessionId, (e) => {
       e.lastMessageAt = this.d.clock.now();
     });
     if (fromOwner && entry.archived) await this.unarchive(entry.sessionId);
     return this.d.sessions.get(entry.sessionId) ?? null;
+  }
+
+  /**
+   * The session an owner message in `entry`'s channel is for: `entry`, unless its transcript says the chat went
+   * on in a session the helper knows that has no channel yet, which then takes this one over.
+   */
+  private async followChat(entry: SessionEntry): Promise<SessionEntry> {
+    const channelId = entry.channelId;
+    if (entry.transcriptPath === null || channelId === null) return entry;
+    const next = await movedOnTo(entry.transcriptPath);
+    if (next === null || next === entry.sessionId || this.d.sessions.get(next)?.channelId !== null) return entry;
+    await this.exclusive(async () => {
+      const from = this.d.sessions.get(entry.sessionId);
+      const to = this.d.sessions.get(next);
+      if (from?.channelId === channelId && to && to.channelId === null) this.takeOver(from, to, "continued-in");
+    });
+    return this.d.sessions.byChannel(channelId) ?? entry;
   }
 
   // ---- layout changes (always inside `exclusive`) -------------------------------------
@@ -623,7 +794,8 @@ export class ChannelManager {
   private requestRename(sessionId: string): void {
     if (this.stopped || !this.d.isOnline() || this.renameTimers.has(sessionId) || this.renaming.has(sessionId)) return;
     const entry = this.d.sessions.get(sessionId);
-    if (!entry || entry.channelId === null) return;
+    // Without a name of its own, a session keeps the name its channel has.
+    if (!entry || entry.channelId === null || isUnnamed(entry.name)) return;
     if (this.wantedName(entry) === entry.channelName) return;
     const wait = (entry.renamedAt ?? Number.NEGATIVE_INFINITY) + this.timing.renameSpacingMs - this.d.clock.now();
     if (wait > 0) this.scheduleRename(sessionId, wait);
@@ -635,13 +807,17 @@ export class ChannelManager {
     this.renaming.add(sessionId);
     try {
       const entry = this.d.sessions.get(sessionId);
-      if (!entry || entry.channelId === null) return;
+      if (!entry || entry.channelId === null || isUnnamed(entry.name)) return;
       const wanted = this.wantedName(entry);
       if (wanted === entry.channelName) return;
       const channelId = entry.channelId;
       try {
+        // The topic goes along: a channel taken over from an earlier session still names that session.
         const answer = asChannel(
-          await this.d.rest.request("PATCH", `/channels/${channelId}`, { body: { name: wanted }, retry429: false }),
+          await this.d.rest.request("PATCH", `/channels/${channelId}`, {
+            body: { name: wanted, topic: topicFor(entry) },
+            retry429: false,
+          }),
         );
         const name = answer?.name || wanted;
         const cached = this.cache.get(channelId);
@@ -723,4 +899,35 @@ export class ChannelManager {
     this.sweepTimer = null;
     for (const sessionId of [...this.renameTimers.keys()]) this.cancelRename(sessionId);
   }
+}
+
+/** A `continued-in` record's session id, or null for any other line. */
+function continuedInRecord(line: string): string | null {
+  if (!line.includes('"continued-in"')) return null;
+  try {
+    const record = JSON.parse(line) as Record<string, unknown>;
+    if (record.type === "continued-in" && typeof record.continuedInSessionId === "string") {
+      return record.continuedInSessionId.toLowerCase();
+    }
+  } catch {
+    // a torn line
+  }
+  return null;
+}
+
+/** The sessions a transcript says its chat went on in (`continued-in` records), oldest first. */
+async function continuedIn(transcriptPath: string): Promise<string[]> {
+  const lines = (await readTailLines(transcriptPath)) ?? [];
+  return lines.map(continuedInRecord).filter((id): id is string => id !== null);
+}
+
+/** The session the chat went on in, when a `continued-in` record comes after the transcript's last turn. */
+async function movedOnTo(transcriptPath: string): Promise<string | null> {
+  let next: string | null = null;
+  for (const line of (await readTailLines(transcriptPath)) ?? []) {
+    const id = continuedInRecord(line);
+    if (id !== null) next = id;
+    else if (line.includes('"type":"user"') || line.includes('"type":"assistant"')) next = null;
+  }
+  return next;
 }
