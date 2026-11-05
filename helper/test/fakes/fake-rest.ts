@@ -63,7 +63,7 @@ export class FakeDiscordRest {
   readonly messages: FakeMessage[] = [];
   readonly requests: RecordedRequest[] = [];
   guild = { id: GUILD_ID, name: "Sessions", owner_id: OWNER_ID };
-  /** Guilds the bot is in (for `GET /users/@me/guilds`). */
+  /** The servers the bot is in, as Discord lists them for the bot's own user. */
   guilds: { id: string; name: string; owner_id: string }[] = [this.guild];
   users = new Map<string, { id: string; username: string; global_name: string | null }>([
     [OWNER_ID, { id: OWNER_ID, username: "owner", global_name: "Owner" }],
@@ -194,8 +194,9 @@ export class FakeDiscordRest {
 
   private route(method: string, path: string, body: any): Response {
     let m: RegExpExecArray | null;
-    if (method === "GET" && path === "/users/@me/guilds") return this.json(200, this.guilds);
-    if (method === "GET" && path === "/users/@me") return this.json(200, { id: BOT_ID, username: "session-kit", bot: true });
+    // The bot's own user ("@me") and the servers it is in.
+    if (method === "GET" && /^\/users\/@me\/guilds$/.test(path)) return this.json(200, this.guilds);
+    if (method === "GET" && /^\/users\/@me$/.test(path)) return this.json(200, { id: BOT_ID, username: "session-kit", bot: true });
     if ((m = /^\/users\/(\d+)$/.exec(path)) && method === "GET") {
       const user = this.users.get(m[1]!);
       return user ? this.json(200, user) : this.error(404, 10013, "Unknown User");

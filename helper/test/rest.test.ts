@@ -32,7 +32,7 @@ describe("routeKey", () => {
     expect(routeKey("POST", "/channels/123456789/messages")).toBe("POST /channels/123456789/messages");
     expect(routeKey("PATCH", "/channels/123456789/messages/987654321")).toBe("PATCH /channels/123456789/messages/:id");
     expect(routeKey("GET", "/guilds/555555/channels")).toBe("GET /guilds/555555/channels");
-    expect(routeKey("GET", "/users/123456789")).toBe("GET /users/:id");
+    expect(routeKey("GET", "/applications/123456789")).toBe("GET /applications/:id");
   });
 });
 
@@ -123,7 +123,7 @@ describe("RestClient", () => {
       throw new TypeError("fetch failed: connection refused");
     }) as unknown as typeof fetch;
     const { rest, clock, log } = await setup({ maxRetries: 2, fetch: failing });
-    const sent = rest.request("GET", "/users/@me").catch((e) => e);
+    const sent = rest.request("GET", "/gateway/bot").catch((e) => e);
     await waitFor(() => calls === 1 && clock.pending === 1);
     await clock.advance(1000);
     await waitFor(() => calls === 2 && clock.pending === 1);
@@ -131,7 +131,7 @@ describe("RestClient", () => {
     const error = await sent;
     expect(calls).toBe(3);
     expect(error).toMatchObject({ kind: "network" });
-    expect(log.lines.some((l) => l.includes("GET /users/@me"))).toBe(true);
+    expect(log.lines.some((l) => l.includes("GET /gateway/bot"))).toBe(true);
   });
 
   test("a global 429 pauses every route", async () => {
@@ -161,7 +161,7 @@ describe("RestClient", () => {
   test("without a token nothing is sent", async () => {
     fake = await FakeDiscordRest.start();
     const rest = new RestClient({ baseUrl: fake.baseUrl, token: () => null, clock: new FakeClock(), log: memoryLogger() });
-    await expect(rest.request("GET", "/users/@me")).rejects.toMatchObject({ kind: "no-token" });
+    await expect(rest.request("GET", "/gateway/bot")).rejects.toMatchObject({ kind: "no-token" });
     expect(fake.requests).toHaveLength(0);
   });
 
