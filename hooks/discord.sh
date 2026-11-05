@@ -2,8 +2,8 @@
 # session-kit Discord hook.
 #
 # usage: discord.sh <event>
-#   <event> is session-start, session-end, notification, pre-ask, post-ask
-#   or stop. The hook's JSON input arrives on stdin.
+#   <event> is session-start, session-end, notification, pre-ask, post-ask,
+#   prompt or stop. The hook's JSON input arrives on stdin.
 #
 # When the Discord helper is installed (~/.claude/session-kit/bin/sk-discord),
 # this runs `sk-discord hook <event>` with the same stdin, stops it after 5
@@ -126,7 +126,7 @@ main() {
     return 0
   fi
   case $event in
-    session-start | session-end | notification | pre-ask | post-ask | stop) ;;
+    session-start | session-end | notification | pre-ask | post-ask | prompt | stop) ;;
     *)
       [ -t 0 ] || cat > /dev/null 2>&1
       return 0

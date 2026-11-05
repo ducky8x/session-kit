@@ -76,6 +76,15 @@ export class FakeCli extends FakeProcessRunner {
   launchNeverStarts = false;
   /** Runs at the start of a launch: a test uses it to change the world between the list and the launch. */
   beforeLaunch: (() => void) | null = null;
+  /**
+   * Waking a background session is refused with this reason, and the prompt is saved for the session's next
+   * start, as the real CLI does when its supervisor can't be reached or the folder isn't trusted.
+   */
+  refuseAndSave: string | null = null;
+  /** Waking a background session is refused because it is already running; nothing is saved. */
+  refuseRunning = false;
+  /** Prompts a refused wake saved for the session's next start. */
+  readonly savedPrompts: string[] = [];
 
   /** Sessions that can be resumed but that the list does not show (an interactive session that ended). */
   private readonly closed = new Set<string>();
@@ -259,6 +268,14 @@ export class FakeCli extends FakeProcessRunner {
       this.launches.push({ kind: "copy", argv, prompt, cwd, row: copy });
       const why = `session ${target.id ?? target.sessionId} is already running, so this started a copy`;
       return this.ok(this.quietLaunch ? `${why}\n` : `${why}\nbackgrounded · ${copy.id}\n`);
+    }
+    // Refusals of a background session's wake, worded as the real CLI words them on stderr.
+    if (target.id !== undefined && this.refuseRunning) {
+      return this.fail(1, `Session ${target.id} is already running — \`claude attach ${target.id}\` to join it\n`);
+    }
+    if (target.id !== undefined && this.refuseAndSave !== null) {
+      this.savedPrompts.push(prompt);
+      return this.fail(1, `${this.refuseAndSave} Your message is saved and will be delivered when session ${target.id} next starts.\n`);
     }
     if (!target.id) target.id = this.shortId();
     if (!this.launchNeverStarts) {

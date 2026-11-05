@@ -8,9 +8,12 @@ import type { ProcessRunner } from "./process.ts";
 /** The command that runs Claude Code sessions, used when `config.json` names no other path. */
 export const CLAUDE_COMMAND = "claude";
 
+/** How every wake prompt starts, so the prompt hook can tell it from one the user typed. */
+export const WAKE_PROMPT_START = "You were woken by a Discord message in your channel:";
+
 /** What a woken session is told. It never starts with a dash, so the CLI cannot read it as an option. */
 export function wakePrompt(message: string): string {
-  return `You were woken by a Discord message in your channel: ${message}. Start the Discord listener again (session-kit:discord skill), then handle the message.`;
+  return `${WAKE_PROMPT_START} ${message}. Start the Discord listener again (session-kit:discord skill), then handle the message.`;
 }
 
 /**
@@ -30,6 +33,15 @@ const ANSI_CODES = /\u001b\[[0-9;]*m/g;
 export function parseBackgroundedId(stdout: string): string | null {
   const plain = stdout.replace(ANSI_CODES, "");
   return /backgrounded\s*[^\s\w]\s*([0-9a-f]{8})\b/i.exec(plain)?.[1]?.toLowerCase() ?? null;
+}
+
+/**
+ * Did the CLI refuse the wake but save the prompt for the session's next start? It does that, and says so,
+ * when its supervisor can't be reached or the folder isn't trusted, among other refusals. It never does it
+ * for a session that is already running.
+ */
+export function savedForNextStart(output: string): boolean {
+  return /your message is saved and will be delivered when session \S+ next starts/i.test(output);
 }
 
 /** Does a failed resume say the session does not exist? */
@@ -145,6 +157,8 @@ export type WakeOutcome =
   | { kind: "gone" }
   /** The CLI started a copy instead (the session was alive after all); the copy was stopped if it could be told. */
   | { kind: "copy" }
+  /** The CLI refused the wake but saved the prompt, which reaches the session when it next starts. */
+  | { kind: "saved" }
   | { kind: "failed"; reason: string }
   /** Another wake is running, or this session was woken less than a minute ago. */
   | { kind: "in_flight" }
@@ -317,6 +331,10 @@ export class Waker {
     }
     const output = `${scrub(result.stdout)}\n${scrub(result.stderr)}`;
     if (result.code !== 0) {
+      if (savedForNextStart(output)) {
+        this.d.log.warn(`waking session ${short} was refused (exit ${result.code}); the CLI saved the prompt for its next start`);
+        return { kind: "saved" };
+      }
       if (wasAbsent && looksNotFound(output)) {
         this.d.log.warn(`session ${short} does not exist any more`);
         return { kind: "gone" };

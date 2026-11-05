@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { type CallHelper, callHelper } from "./client.ts";
 import { runDaemon } from "./run-daemon.ts";
 import { notificationHook } from "./hooks/notification.ts";
-import { postAskHook, preAskHook } from "./hooks/ask.ts";
+import { postAskHook, preAskHook, promptHook } from "./hooks/ask.ts";
 import { stopHook } from "./hooks/stop.ts";
 import { listenCommand } from "./listen.ts";
 import { sessionEndHook } from "./hooks/session-end.ts";
@@ -78,6 +78,7 @@ export const HOOKS: Record<string, Hook> = {
   stop: stopHook,
   "pre-ask": preAskHook,
   "post-ask": postAskHook,
+  prompt: promptHook,
 };
 
 /** Only the real binary may reach the Keychain, launchctl or other programs; a test that gets here is a bug. */
