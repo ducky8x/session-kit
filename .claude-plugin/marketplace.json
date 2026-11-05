@@ -9,7 +9,7 @@
     {
       "name": "session-kit",
       "source": "./",
-      "description": "Sets up each Claude Code session: single-agent or multi-agent, autonomous mode, standing rules for every session and subagent, per-project context files, and task specs you approve before building.",
+      "description": "Sets up each Claude Code session: single-agent or multi-agent, autonomous mode, standing rules for every session and subagent, per-project context files, task specs you approve before building, and an optional Discord channel per session on macOS.",
       "category": "productivity"
     }
   ]
