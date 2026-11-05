@@ -2,6 +2,7 @@ import type { TimerHandle } from "./clock.ts";
 import type { Daemon, DiscordMessage } from "./daemon.ts";
 import type { DefaultAnswer, ListenerEvent, ParsedAnswer } from "./events.ts";
 import type { Inbound } from "./inbound.ts";
+import { readTailLines } from "./names.ts";
 import { RequestError } from "./server.ts";
 import type { SessionEntry } from "./state.ts";
 import { WAKE_PROMPT_START } from "./wake.ts";
@@ -50,6 +51,8 @@ export interface AskItem {
 export interface QuestionRecord {
   id: string;
   toolUseId: string | null;
+  /** The session's transcript, read before each step to see whether the user closed the dialog. */
+  transcriptPath?: string | null;
   items: AskItem[];
   askedAt: number;
   status: "open" | "answered" | "defaulted";
@@ -222,6 +225,44 @@ export function typedByUser(prompt: string): boolean {
   return !/^<[a-z][\w-]*[\s>/]/i.test(text);
 }
 
+/** How the result of a call the user rejected in its dialog begins (Esc, or a reply such as "clarify"). */
+const REJECTED_BY_USER = "The user doesn't want to proceed with this tool use.";
+
+/**
+ * Did the user close this AskUserQuestion dialog with Esc or "clarify"? Claude Code denies the call then, runs
+ * no hook for it, and writes its result to the transcript as an error that opens with a fixed sentence. Only
+ * the end of the transcript is read; false when the result isn't there or the file can't be read.
+ */
+export async function dismissedInTranscript(path: string, toolUseId: string): Promise<boolean> {
+  const lines = (await readTailLines(path)) ?? [];
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (!line.includes(toolUseId) || !line.includes('"tool_result"')) continue;
+    let record: unknown;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue; // a torn line
+    }
+    const content = (record as { message?: { content?: unknown } }).message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content as Record<string, unknown>[]) {
+      if (block?.type !== "tool_result" || block.tool_use_id !== toolUseId) continue;
+      return block.is_error === true && resultText(block.content).trimStart().startsWith(REJECTED_BY_USER);
+    }
+  }
+  return false;
+}
+
+/** A tool result's text: a string, or the text of its text blocks. */
+function resultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((b) => (b && typeof b === "object" && typeof (b as { text?: unknown }).text === "string" ? (b as { text: string }).text : ""))
+    .join("\n");
+}
+
 function describeAnswer(event: Extract<ListenerEvent, { type: "answer" }>): string {
   const chosen = event.answers.map((a) => `${a.number}) ${a.option}`).join(", ");
   return `answer to your open question${event.late ? " (after the defaults were taken)" : ""}: ${chosen || event.raw}`;
@@ -272,7 +313,8 @@ export class Questions {
         const cwd = typeof req.cwd === "string" ? req.cwd : null;
         if (!(await this.daemon.adopt(sessionId, entrypoint, cwd))) return { opened: false };
         const toolUseId = typeof req.toolUseId === "string" ? req.toolUseId : null;
-        return { opened: true, id: this.open(sessionId, toolUseId, items) };
+        const transcriptPath = typeof req.transcriptPath === "string" && req.transcriptPath !== "" ? req.transcriptPath : null;
+        return { opened: true, id: this.open(sessionId, toolUseId, items, transcriptPath) };
       })
       .add("answer", (req) => {
         const sessionId = typeof req.sessionId === "string" ? req.sessionId : "";
@@ -312,12 +354,13 @@ export class Questions {
   }
 
   /** Record a new question for the session (replacing any open one) and start its timers. */
-  open(sessionId: string, toolUseId: string | null, items: AskItem[]): string {
+  open(sessionId: string, toolUseId: string | null, items: AskItem[], transcriptPath: string | null = null): string {
     const now = this.daemon.deps.clock.now();
     const id = `q${now.toString(36)}${this.nextId++}`;
     const record: QuestionRecord = {
       id,
       toolUseId,
+      transcriptPath,
       items,
       askedAt: now,
       status: "open",
@@ -361,11 +404,30 @@ export class Questions {
       ].filter((s) => !s.done);
       const overdue = steps.filter((s) => s.due <= now);
       const last = overdue.at(-1);
-      if (last) this.at(sessionId, 0, last.run);
-      for (const step of steps.filter((s) => s.due > now)) this.at(sessionId, step.due - now, step.run);
+      if (last) this.at(sessionId, 0, () => this.unlessDismissed(sessionId, last.run));
+      for (const step of steps.filter((s) => s.due > now)) this.at(sessionId, step.due - now, () => this.unlessDismissed(sessionId, step.run));
       return;
     }
     if (q.status === "defaulted") this.armCheckin(sessionId);
+  }
+
+  /**
+   * Run a step of the open question, unless its transcript shows the user closed the dialog with Esc or
+   * "clarify": then the question is settled at the keyboard instead.
+   */
+  private unlessDismissed(sessionId: string, run: () => void): void {
+    const q = this.stillOpen(sessionId);
+    if (!q || q.toolUseId === null || !q.transcriptPath) {
+      run();
+      return;
+    }
+    const { id, toolUseId } = q;
+    const settle = (dismissed: boolean) => {
+      if (this.question(sessionId)?.id !== id) return; // a newer question took its place meanwhile
+      if (dismissed) this.answeredAtKeyboard(sessionId, toolUseId);
+      else run();
+    };
+    void dismissedInTranscript(q.transcriptPath, toolUseId).then(settle, () => settle(false));
   }
 
   private armCheckin(sessionId: string): void {

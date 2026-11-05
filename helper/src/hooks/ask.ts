@@ -30,6 +30,7 @@ export async function preAskHook(deps: HookDeps): Promise<number> {
         toolUseId: stringField(input, "tool_use_id"),
         questions,
         cwd: stringField(input, "cwd"),
+        transcriptPath: stringField(input, "transcript_path"),
         entrypoint: deps.env.CLAUDE_CODE_ENTRYPOINT ?? null,
       },
       { timeoutMs: deps.timeoutMs ?? ASK_TIMEOUT_MS },

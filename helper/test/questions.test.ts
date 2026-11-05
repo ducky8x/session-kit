@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
 import { sessionFeatures } from "../src/features.ts";
 import {
   ANSWERED_AT_KEYBOARD,
   AUTONOMOUS_POST,
   type AskItem,
   classifyAskResponse,
+  dismissedInTranscript,
   formatQuestions,
   parseReply,
   takeDefaults,
@@ -13,6 +15,7 @@ import {
 import { wakePrompt } from "../src/wake.ts";
 import { OWNER_ID } from "./fakes/fake-rest.ts";
 import { inboundKit } from "./helpers/inbound-kit.ts";
+import { tmpDir } from "./helpers/tmp.ts";
 import { waitFor } from "./helpers/wait.ts";
 
 const MINUTE = 60_000;
@@ -40,15 +43,31 @@ const QUESTIONS = [
   },
 ];
 
-function preAsk(sessionId: string, toolUseId = "toolu_01") {
+function preAsk(sessionId: string, toolUseId = "toolu_01", transcriptPath?: string) {
   return JSON.stringify({
     session_id: sessionId,
     hook_event_name: "PreToolUse",
     tool_name: "AskUserQuestion",
     tool_use_id: toolUseId,
     tool_input: { questions: QUESTIONS },
+    ...(transcriptPath === undefined ? {} : { transcript_path: transcriptPath }),
   });
 }
+
+/** Transcript lines: the call, then (when given) its result. Made up, in the shape Claude Code writes. */
+function transcriptLines(result?: { is_error?: boolean; content: unknown; toolUseResult?: unknown }, toolUseId = "toolu_01"): string {
+  const call = { type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: toolUseId, name: "AskUserQuestion", input: { questions: QUESTIONS } }] } };
+  const lines = [JSON.stringify({ type: "user", message: { role: "user", content: "pick a database" } }), JSON.stringify(call)];
+  if (result) {
+    const block = { type: "tool_result", tool_use_id: toolUseId, content: result.content, ...(result.is_error ? { is_error: true } : {}) };
+    lines.push(JSON.stringify({ type: "user", message: { role: "user", content: [block] }, toolUseResult: result.toolUseResult ?? result.content }));
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+/** The result of a call the user rejected in its dialog opens with this sentence; the rest is made up. */
+const REJECTED = "The user doesn't want to proceed with this tool use. Wait for the user.";
+const CLARIFY = "The user doesn't want to proceed with this tool use. The user said:\nThey want to clarify the questions.";
 
 function postAsk(sessionId: string, toolResponse: unknown, toolUseId = "toolu_01") {
   return JSON.stringify({
@@ -130,6 +149,36 @@ describe("parsing replies", () => {
         "Reply like `1a 2b`, or in your own words.",
       ].join("\n"),
     );
+  });
+});
+
+describe("reading from the transcript whether the user closed the dialog", () => {
+  const write = (text: string) => {
+    const file = `${tmpDir()}/t.jsonl`;
+    writeFileSync(file, text);
+    return file;
+  };
+
+  test("a rejected call, with or without a reply such as clarify, is closed by the user", async () => {
+    expect(await dismissedInTranscript(write(transcriptLines({ is_error: true, content: REJECTED })), "toolu_01")).toBe(true);
+    const blocks = [{ type: "text", text: CLARIFY }];
+    expect(await dismissedInTranscript(write(transcriptLines({ is_error: true, content: blocks })), "toolu_01")).toBe(true);
+  });
+
+  test("an open dialog, an answer, the idle timeout, another call or a rule's denial is not", async () => {
+    const timedOut = { questions: QUESTIONS, answers: {}, annotations: {}, afkTimeoutMs: 60_000 };
+    for (const text of [
+      transcriptLines(),
+      transcriptLines({ content: "Your questions have been answered.", toolUseResult: ANSWERED }),
+      transcriptLines({ content: "No response after 60s.", toolUseResult: timedOut }),
+      transcriptLines({ is_error: true, content: REJECTED }, "toolu_other"),
+      transcriptLines({ is_error: true, content: "Permission for this tool use was denied." }),
+      transcriptLines({ content: REJECTED }),
+    ]) {
+      expect(await dismissedInTranscript(write(text), "toolu_01")).toBe(false);
+    }
+    expect(await dismissedInTranscript(`${tmpDir()}/missing.jsonl`, "toolu_01")).toBe(false);
+    expect(await dismissedInTranscript(write("{ torn\n"), "toolu_01")).toBe(false);
   });
 });
 
@@ -319,6 +368,49 @@ describe("question timing", () => {
     await k.clock.advance(2 * HOUR);
     await k.settle();
     expect(k.replies()).toHaveLength(1);
+  });
+
+  test("a dialog closed with Esc, with no prompt after it, is settled at 2:00 instead of posted", async () => {
+    const k = await inboundKit();
+    k.claude.addInteractive(k.sessionId);
+    const transcript = `${tmpDir()}/t.jsonl`;
+    writeFileSync(transcript, transcriptLines());
+    expect((await k.cli(["hook", "pre-ask"], { stdin: preAsk(k.sessionId, "toolu_01", transcript) })).code).toBe(0);
+    await k.clock.advance(MINUTE);
+    writeFileSync(transcript, transcriptLines({ is_error: true, content: REJECTED }));
+    await k.clock.advance(MINUTE);
+    await waitFor(() => k.daemon.sessions.get(k.sessionId)!.question?.status === "answered");
+    await k.clock.advance(2 * HOUR);
+    await k.settle();
+    expect(k.replies()).toEqual([]);
+  });
+
+  test("a dialog still open, or closed by the idle timeout, goes out at 2:00; a later Esc stops the reminder", async () => {
+    const k = await inboundKit();
+    k.claude.addInteractive(k.sessionId);
+    const transcript = `${tmpDir()}/t.jsonl`;
+    writeFileSync(transcript, transcriptLines());
+    expect((await k.cli(["hook", "pre-ask"], { stdin: preAsk(k.sessionId, "toolu_01", transcript) })).code).toBe(0);
+    await k.clock.advance(2 * MINUTE);
+    await waitFor(() => k.replies().length === 1);
+    // The user comes back at 10:00 and closes the dialog with Esc: no reminder at 30:00, no defaults at 60:00.
+    await k.clock.advance(8 * MINUTE);
+    writeFileSync(transcript, transcriptLines({ is_error: true, content: REJECTED }));
+    await k.clock.advance(20 * MINUTE);
+    await waitFor(() => k.daemon.sessions.get(k.sessionId)!.question?.status === "answered");
+    await waitFor(() => k.rest.posted(k.channelId())[0]!.edited);
+    expect(k.rest.posted(k.channelId())[0]!.content).toBe(ANSWERED_AT_KEYBOARD);
+    await k.clock.advance(2 * HOUR);
+    await k.settle();
+    expect(k.replies()).toHaveLength(1);
+
+    const t = await inboundKit();
+    t.claude.addInteractive(t.sessionId);
+    const timedOut = `${tmpDir()}/t.jsonl`;
+    writeFileSync(timedOut, transcriptLines({ content: "No response after 60s.", toolUseResult: { questions: QUESTIONS, answers: {}, afkTimeoutMs: 60_000 } }));
+    expect((await t.cli(["hook", "pre-ask"], { stdin: preAsk(t.sessionId, "toolu_01", timedOut) })).code).toBe(0);
+    await t.clock.advance(2 * MINUTE);
+    await waitFor(() => t.replies().length === 1);
   });
 
   test("the wake prompt, task notifications and messages from other sessions don't count as the user", async () => {

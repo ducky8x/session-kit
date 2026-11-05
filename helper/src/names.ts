@@ -67,11 +67,8 @@ export function parseAgentList(stdout: string): AgentEntry[] | null {
   return entries;
 }
 
-/**
- * The session's latest name from its transcript: the last `{"type":"custom-title","customTitle":...}` line in
- * the final 256 KB. Null when there is none or the file cannot be read.
- */
-export async function readCustomTitle(path: string, tailBytes = TRANSCRIPT_TAIL_BYTES): Promise<string | null> {
+/** The lines in the last `tailBytes` of a file (the first one dropped when it starts mid-line), or null. */
+export async function readTailLines(path: string, tailBytes = TRANSCRIPT_TAIL_BYTES): Promise<string[] | null> {
   let handle: Awaited<ReturnType<typeof open>> | null = null;
   try {
     handle = await open(path, "r");
@@ -81,22 +78,31 @@ export async function readCustomTitle(path: string, tailBytes = TRANSCRIPT_TAIL_
     await handle.read(buffer, 0, buffer.length, start);
     const lines = buffer.toString("utf8").split("\n");
     if (start > 0) lines.shift(); // starts mid-line
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i]!;
-      if (!line.includes('"custom-title"')) continue;
-      try {
-        const record = JSON.parse(line) as Record<string, unknown>;
-        if (record.type === "custom-title" && typeof record.customTitle === "string") return record.customTitle;
-      } catch {
-        // a torn line
-      }
-    }
-    return null;
+    return lines;
   } catch {
     return null;
   } finally {
     await handle?.close();
   }
+}
+
+/**
+ * The session's latest name from its transcript: the last `{"type":"custom-title","customTitle":...}` line in
+ * the final 256 KB. Null when there is none or the file cannot be read.
+ */
+export async function readCustomTitle(path: string, tailBytes = TRANSCRIPT_TAIL_BYTES): Promise<string | null> {
+  const lines = (await readTailLines(path, tailBytes)) ?? [];
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (!line.includes('"custom-title"')) continue;
+    try {
+      const record = JSON.parse(line) as Record<string, unknown>;
+      if (record.type === "custom-title" && typeof record.customTitle === "string") return record.customTitle;
+    } catch {
+      // a torn line
+    }
+  }
+  return null;
 }
 
 export interface NamePollerDeps {
