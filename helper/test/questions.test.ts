@@ -314,6 +314,26 @@ describe("question timing", () => {
     expect(await next).toMatchObject({ type: "answer", answers: [{ number: 1, letter: "a", option: "SQLite" }], missing: [2], late: true });
   });
 
+  test("with Discord turned off, an open question is not posted", async () => {
+    const k = await asked();
+    k.setConfig((c) => {
+      c.enabled = false;
+    });
+    await k.call({ op: "reload" });
+    await k.clock.advance(2 * HOUR);
+    await k.settle();
+    expect(k.rest.posted(k.channelId())).toHaveLength(0);
+    expect(k.daemon.outbox.size).toBe(0);
+    // Turned on again: the latest step that is due runs once (the hour has passed, so the defaults).
+    expect((await k.cli(["on"])).code).toBe(0);
+    await k.connected();
+    await k.clock.advance(0);
+    await k.settle();
+    const posts = k.rest.posted(k.channelId()).map((m) => m.content);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.startsWith(AUTONOMOUS_POST)).toBe(true);
+  });
+
   test("open questions survive a restart: overdue steps run once, the rest keep their times", async () => {
     const k = await asked();
     const question = k.daemon.sessions.get(k.sessionId)!.question!;

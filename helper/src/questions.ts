@@ -208,6 +208,10 @@ export class Questions {
     this.daemon.onSend((event) => {
       if (event.done) this.stopCheckins(event.sessionId);
     });
+    // Steps skipped while Discord was off: the latest one that is due runs when it comes back on.
+    this.daemon.onConfigChange((config, before) => {
+      if (config.enabled && !before.enabled) this.resumeAll();
+    });
     this.daemon.onPosted((event) => {
       if (event.tag === null || !event.tag.startsWith("question:")) return;
       const id = event.tag.slice("question:".length);
@@ -326,7 +330,9 @@ export class Questions {
     this.at(sessionId, due - this.daemon.deps.clock.now(), () => this.checkin(sessionId, next));
   }
 
+  /** The session's question while it is open and Discord is on (with Discord off, its steps are skipped). */
   private stillOpen(sessionId: string): QuestionRecord | null {
+    if (!this.daemon.currentConfig().enabled) return null;
     const q = this.question(sessionId);
     return q && q.status === "open" ? q : null;
   }
@@ -373,6 +379,10 @@ export class Questions {
     const entry = this.daemon.sessions.get(sessionId);
     const q = this.question(sessionId);
     if (!entry || !q || q.status !== "defaulted" || q.checkinsDone || q.autonomousAt === null) return;
+    if (!this.daemon.currentConfig().enabled) {
+      this.armCheckin(sessionId);
+      return;
+    }
     if (entry.doneAt !== null && entry.doneAt >= q.autonomousAt) {
       this.stopCheckins(sessionId);
       return;
