@@ -1,5 +1,9 @@
 #!/usr/bin/env bun
 import { homedir } from "node:os";
+import { type CallHelper, callHelper } from "./client.ts";
+import { sessionEndHook } from "./hooks/session-end.ts";
+import { type HookDeps, sessionStartHook } from "./hooks/session-start.ts";
+import { pathsFor } from "./paths.ts";
 import { VERSION } from "./version.ts";
 
 /** What every command gets from the outside world. Tests pass fakes; `main` passes the real things. */
@@ -12,17 +16,53 @@ export interface CliDeps {
   out(text: string): void;
   err(text: string): void;
   readStdin(): Promise<string>;
+  /** `process.platform` unless a test says otherwise. */
+  platform?: string;
+  /** How commands reach the helper. Defaults to the real control socket. */
+  call?: CallHelper;
+  /** Tests shorten the hooks' socket waits. */
+  socketTimeoutMs?: number;
 }
 
 type Command = (args: string[], deps: CliDeps) => Promise<number>;
 
+function hookDeps(deps: CliDeps): HookDeps {
+  return {
+    paths: pathsFor(deps.home),
+    env: deps.env,
+    platform: deps.platform ?? process.platform,
+    readStdin: deps.readStdin,
+    out: deps.out,
+    call: deps.call ?? callHelper,
+    ...(deps.socketTimeoutMs === undefined ? {} : { timeoutMs: deps.socketTimeoutMs }),
+  };
+}
+
+type Hook = (deps: HookDeps) => Promise<number>;
+
+/**
+ * Hook events, by name. The bash wrapper runs `sk-discord hook <event>` with the hook's JSON on stdin and
+ * shows what it prints only when it exits 0.
+ */
+export const HOOKS: Record<string, Hook> = {
+  "session-start": sessionStartHook,
+  "session-end": sessionEndHook,
+};
+
 export const USAGE = `sk-discord: the Discord helper for session-kit
 
+  sk-discord hook <event>               run a session hook (JSON on stdin)
   sk-discord --version                  print the helper's version
   sk-discord help                       print this help`;
 
 /** The commands, by their first word. */
-const COMMANDS: Record<string, Command> = {};
+export const COMMANDS: Record<string, Command> = {
+  hook: async (args, deps) => {
+    const hook = HOOKS[args[0] ?? ""];
+    // An event this version does not handle yet is not an error: the wrapper may be newer than the binary.
+    return hook ? hook(hookDeps(deps)) : 0;
+  },
+};
 
 /** Run one `sk-discord` command and return its exit code. */
 export async function runCli(argv: readonly string[], deps: CliDeps): Promise<number> {
