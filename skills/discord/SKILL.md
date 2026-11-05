@@ -118,6 +118,8 @@ Questions reach Discord on their own: a hook records each `AskUserQuestion`, and
 
 While the dialog is open, a Discord answer waits until it closes. If the dialog closes unanswered, the question stays open on Discord. For that question, this replaces the start skill's rule that an unanswered question means working autonomously and asking nothing more: keep working on whatever doesn't need the answer, end the turn if nothing is left, and wait for an `answer` or `autonomous` event.
 
+Once the user types a message at the keyboard, the open question counts as handled there, whether they answered it, pressed Esc or chose to clarify: it isn't posted, a post that already went out is marked answered, and no `answer` or `autonomous` event follows for it.
+
 ### Events
 
 Each line from the listener is JSON with a `type`:

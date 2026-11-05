@@ -8,7 +8,9 @@ import {
   formatQuestions,
   parseReply,
   takeDefaults,
+  typedByUser,
 } from "../src/questions.ts";
+import { wakePrompt } from "../src/wake.ts";
 import { OWNER_ID } from "./fakes/fake-rest.ts";
 import { inboundKit } from "./helpers/inbound-kit.ts";
 import { waitFor } from "./helpers/wait.ts";
@@ -57,6 +59,10 @@ function postAsk(sessionId: string, toolResponse: unknown, toolUseId = "toolu_01
     tool_input: { questions: QUESTIONS },
     tool_response: toolResponse,
   });
+}
+
+function prompt(sessionId: string, text: string) {
+  return JSON.stringify({ session_id: sessionId, hook_event_name: "UserPromptSubmit", prompt: text });
 }
 
 const ANSWERED = {
@@ -124,6 +130,25 @@ describe("parsing replies", () => {
         "Reply like `1a 2b`, or in your own words.",
       ].join("\n"),
     );
+  });
+});
+
+describe("telling a prompt the user typed from one Claude Code or the helper sent", () => {
+  test("typed text and slash commands are the user's", () => {
+    for (const text of ["use Postgres", "  /discord status", "1a 2b", "what is <div> for?"]) expect(typedByUser(text)).toBe(true);
+  });
+
+  test("tagged prompts, the wake prompt and empty text are not", () => {
+    for (const text of [
+      "<task-notification>\n<task-id>b1</task-id>\n</task-notification>",
+      '<cross-session-message from="worker">hi</cross-session-message>',
+      "<system-reminder>x</system-reminder>",
+      wakePrompt("run the tests"),
+      "",
+      "   ",
+    ]) {
+      expect(typedByUser(text)).toBe(false);
+    }
   });
 });
 
@@ -273,6 +298,44 @@ describe("question timing", () => {
     expect(await listener).toMatchObject({ type: "text", text: "1b" });
   });
 
+  test("a prompt typed at 1:00 (the dialog was dismissed) settles the question: nothing goes to Discord", async () => {
+    const k = await asked();
+    await k.clock.advance(MINUTE);
+    expect(await k.cli(["hook", "prompt"], { stdin: prompt(k.sessionId, "never mind, use SQLite") })).toEqual({ code: 0, out: "", err: "" });
+    await k.clock.advance(2 * HOUR);
+    await k.settle();
+    expect(k.replies()).toEqual([]);
+    expect(k.daemon.sessions.get(k.sessionId)!.question).toMatchObject({ status: "answered", source: "keyboard" });
+  });
+
+  test("a prompt typed after the post marks it answered, and no reminder or autonomous step follows", async () => {
+    const k = await asked();
+    await k.clock.advance(5 * MINUTE);
+    await k.settle();
+    expect(k.replies()).toHaveLength(1);
+    expect((await k.cli(["hook", "prompt"], { stdin: prompt(k.sessionId, "I'm back") })).code).toBe(0);
+    await waitFor(() => k.rest.posted(k.channelId())[0]!.edited);
+    expect(k.rest.posted(k.channelId())[0]!.content).toBe(ANSWERED_AT_KEYBOARD);
+    await k.clock.advance(2 * HOUR);
+    await k.settle();
+    expect(k.replies()).toHaveLength(1);
+  });
+
+  test("the wake prompt, task notifications and messages from other sessions don't count as the user", async () => {
+    const k = await asked();
+    await k.clock.advance(MINUTE);
+    for (const text of [
+      wakePrompt("1a 2b"),
+      "<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>",
+      '<cross-session-message from="worker">done</cross-session-message>',
+    ]) {
+      expect((await k.cli(["hook", "prompt"], { stdin: prompt(k.sessionId, text) })).code).toBe(0);
+    }
+    await k.clock.advance(MINUTE);
+    await k.settle();
+    expect(k.replies()).toHaveLength(1);
+  });
+
   test("reminder at 30:00, autonomous at 60:00 with the defaults, check-ins at 2:00:00 and 3:00:00", async () => {
     const k = await asked();
     const events: unknown[] = [];
@@ -383,6 +446,14 @@ describe("question timing", () => {
     sessionFeatures(k.daemon).questions.resumeAll();
     await k.settle();
     expect(k.replies()).toHaveLength(1);
+  });
+
+  test("pre-ask, post-ask and prompt print nothing and exit 0 with Discord off or the helper down", async () => {
+    const { daemonKit } = await import("./helpers/daemon-kit.ts");
+    const off = await daemonKit({ enabled: false });
+    expect(await off.cli(["hook", "prompt"], { stdin: prompt("x", "hello") })).toEqual({ code: 0, out: "", err: "" });
+    const down = await daemonKit({ noStart: true });
+    expect((await down.cli(["hook", "prompt"], { stdin: prompt("x", "hello") })).out).toBe("");
   });
 
   test("pre-ask and post-ask print nothing and exit 0 with Discord off or the helper down", async () => {

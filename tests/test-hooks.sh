@@ -101,6 +101,7 @@ want = {
     "Notification": ("permission_prompt|elicitation_dialog", "notification"),
     "PreToolUse": ("AskUserQuestion", "pre-ask"),
     "PostToolUse": ("AskUserQuestion", "post-ask"),
+    "UserPromptSubmit": (None, "prompt"),
     "Stop": (None, "stop"),
 }
 for event, (matcher, arg) in want.items():
@@ -113,6 +114,15 @@ for event, (matcher, arg) in want.items():
     assert handler["timeout"] == 10, event
 PY
 then pass "hooks.json wires the Discord events to discord.sh"; else fail "hooks.json wires the Discord events to discord.sh"; fi
+if python3 - "$HOOKS_JSON" "$DISCORD" <<'PY' 2>/dev/null
+import json, re, sys
+hooks = json.load(open(sys.argv[1]))["hooks"]
+accepted = re.search(r"\n\s*((?:[a-z-]+ \| )+[a-z-]+)\) ;;", open(sys.argv[2]).read()).group(1).split(" | ")
+wired = [m.group(1) for groups in hooks.values() for g in groups for h in g["hooks"]
+         for m in [re.search(r'/hooks/discord\.sh" ([a-z-]+)$', h["command"])] if m]
+assert wired and all(arg in accepted for arg in wired), (wired, accepted)
+PY
+then pass "every event hooks.json sends to discord.sh is one it runs"; else fail "every event hooks.json sends to discord.sh is one it runs"; fi
 
 echo "== session-start: startup and clear"
 new_home startup
@@ -358,7 +368,7 @@ mkdir -p "$PLUGIN_020/.claude-plugin"
 printf '{\n  "name": "session-kit",\n  "version": "0.2.0"\n}\n' > "$PLUGIN_020/.claude-plugin/plugin.json"
 REPO_VERSION=$(sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" | head -n 1)
 
-DISCORD_EVENTS="session-start session-end notification pre-ask post-ask stop"
+DISCORD_EVENTS="session-start session-end notification pre-ask post-ask prompt stop"
 
 echo "== discord: no helper installed"
 new_home dnone
@@ -387,7 +397,7 @@ expect_status0 "first run on macOS exits 0"
 expect_has "first run on macOS with no config.json offers Discord" "$OFFER_LINE"
 expect_has "the offer names the start question" "Set up Discord now?"
 expect_lacks "the offer isn't the set-up line" "$SETUP_LINE"
-for ev in session-end notification pre-ask post-ask stop; do
+for ev in session-end notification pre-ask post-ask prompt stop; do
   run_hook "$DISCORD" "$(event_input "$ev")" "$ev"
   expect_empty "$ev prints nothing on a first run on macOS"
 done
@@ -451,7 +461,7 @@ for src in clear resume fork; do
 done
 run_hook "$DISCORD" "$(start_input s-d compact)" session-start
 expect_empty "compact gives no set-up line"
-for ev in session-end notification pre-ask post-ask stop; do
+for ev in session-end notification pre-ask post-ask prompt stop; do
   run_hook "$DISCORD" "$(event_input "$ev")" "$ev"
   expect_empty "$ev prints nothing when enabled without a helper"
 done
@@ -512,7 +522,7 @@ if cmp -s "$TMP_ROOT/expected-stdin" "$H/fake/stdin-session-start"; then pass "s
 if [ "$(printf '%s\n' "$OUT" | tail -n 1)" = "Listener: sk-discord listen --session s-d" ]; then pass "the helper's lines come last"; else fail "the helper's lines come last" "$(printf '%s\n' "$OUT" | tail -n 1)"; fi
 
 touch "$H/fake/fail"
-for ev in session-start stop; do
+for ev in session-start prompt stop; do
   run_hook "$DISCORD" "$(event_input "$ev")" "$ev"
   expect_status0 "$ev exits 0 when the helper fails"
   expect_lacks "$ev prints nothing from a failed helper call" "error output"
@@ -520,7 +530,7 @@ done
 rm -f "$H/fake/fail"
 
 touch "$H/fake/sleep"
-for ev in stop session-start; do
+for ev in stop prompt session-start; do
   SECONDS=0
   run_hook "$DISCORD" "$(event_input "$ev")" "$ev"
   elapsed=$SECONDS

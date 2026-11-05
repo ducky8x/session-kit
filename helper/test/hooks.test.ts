@@ -246,13 +246,22 @@ describe("timing", () => {
 });
 
 describe("hook dispatch", () => {
-  test("every event hooks/discord.sh runs has a handler", async () => {
+  test("every event hooks.json and hooks/discord.sh run has a handler", async () => {
     const { readFileSync } = await import("node:fs");
     const { HOOKS } = await import("../src/main.ts");
     const wrapper = readFileSync(new URL("../../hooks/discord.sh", import.meta.url), "utf8");
-    const events = /session-start \| session-end \| notification \| pre-ask \| post-ask \| stop\)/.exec(wrapper);
-    expect(events).not.toBeNull();
-    expect(Object.keys(HOOKS).sort()).toEqual(["notification", "post-ask", "pre-ask", "session-end", "session-start", "stop"]);
+    const accepted = /\n\s*((?:[a-z-]+ \| )+[a-z-]+)\) ;;/.exec(wrapper)?.[1]?.split(" | ") ?? [];
+    expect(accepted.sort()).toEqual(Object.keys(HOOKS).sort());
+    expect(Object.keys(HOOKS).sort()).toEqual(["notification", "post-ask", "pre-ask", "prompt", "session-end", "session-start", "stop"]);
+    const config = JSON.parse(readFileSync(new URL("../../hooks/hooks.json", import.meta.url), "utf8")) as {
+      hooks: Record<string, { hooks: { command: string }[] }[]>;
+    };
+    const wired = Object.values(config.hooks)
+      .flat()
+      .flatMap((group) => group.hooks)
+      .flatMap((h) => /\/hooks\/discord\.sh" ([a-z-]+)$/.exec(h.command)?.[1] ?? []);
+    expect(wired.length).toBeGreaterThan(0);
+    for (const event of wired) expect(Object.keys(HOOKS)).toContain(event);
   });
 
   test("an event this version does not know exits 0 with nothing printed", async () => {

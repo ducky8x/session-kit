@@ -4,6 +4,7 @@ import type { DefaultAnswer, ListenerEvent, ParsedAnswer } from "./events.ts";
 import type { Inbound } from "./inbound.ts";
 import { RequestError } from "./server.ts";
 import type { SessionEntry } from "./state.ts";
+import { WAKE_PROMPT_START } from "./wake.ts";
 
 const MINUTE = 60_000;
 
@@ -209,6 +210,18 @@ export function readAskItems(value: unknown): AskItem[] | null {
   return items;
 }
 
+/**
+ * Did the user type this prompt? UserPromptSubmit also runs for prompts that come from elsewhere: background
+ * task notifications (the Discord listener's events among them), messages from other sessions and system
+ * notes, which all start with a tag such as `<task-notification>`, and the prompt that wakes a session from
+ * Discord. None of those means the user is at the keyboard.
+ */
+export function typedByUser(prompt: string): boolean {
+  const text = prompt.trimStart();
+  if (text === "" || text.startsWith(WAKE_PROMPT_START)) return false;
+  return !/^<[a-z][\w-]*[\s>/]/i.test(text);
+}
+
 function describeAnswer(event: Extract<ListenerEvent, { type: "answer" }>): string {
   const chosen = event.answers.map((a) => `${a.number}) ${a.option}`).join(", ");
   return `answer to your open question${event.late ? " (after the defaults were taken)" : ""}: ${chosen || event.raw}`;
@@ -265,6 +278,12 @@ export class Questions {
         const sessionId = typeof req.sessionId === "string" ? req.sessionId : "";
         const toolUseId = typeof req.toolUseId === "string" ? req.toolUseId : null;
         return { closed: this.answeredAtKeyboard(sessionId, toolUseId) };
+      })
+      // The user typed a prompt, so they are at the keyboard: an open question is settled there. This covers
+      // a dialog closed with Esc or "clarify", where Claude Code denies the tool and PostToolUse never runs.
+      .add("present", (req) => {
+        const sessionId = typeof req.sessionId === "string" ? req.sessionId : "";
+        return { closed: this.answeredAtKeyboard(sessionId, null) };
       });
     this.resumeAll();
   }

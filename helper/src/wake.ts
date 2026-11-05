@@ -8,9 +8,12 @@ import type { ProcessRunner } from "./process.ts";
 /** The command that runs Claude Code sessions, used when `config.json` names no other path. */
 export const CLAUDE_COMMAND = "claude";
 
+/** How every wake prompt starts, so the prompt hook can tell it from one the user typed. */
+export const WAKE_PROMPT_START = "You were woken by a Discord message in your channel:";
+
 /** What a woken session is told. It never starts with a dash, so the CLI cannot read it as an option. */
 export function wakePrompt(message: string): string {
-  return `You were woken by a Discord message in your channel: ${message}. Start the Discord listener again (session-kit:discord skill), then handle the message.`;
+  return `${WAKE_PROMPT_START} ${message}. Start the Discord listener again (session-kit:discord skill), then handle the message.`;
 }
 
 /**
