@@ -57,7 +57,7 @@ expect_under() { # <name> <limit>
 # make_file <path> <bytes>: write exactly <bytes> bytes of text lines
 make_file() {
   mkdir -p "$(dirname "$1")"
-  awk -v n="$2" 'BEGIN { for (i = 0; i < n - 1; i++) printf (i % 80 == 79) ? "\n" : "x"; printf "\n" }' > "$1"
+  awk -v n="$2" 'BEGIN { for (i = 0; i < n - 1; i++) printf "%s", (i % 80 == 79 ? "\n" : "x"); printf "\n" }' > "$1"
 }
 
 json_valid() { printf '%s' "$OUT" | python3 -c 'import json,sys;json.load(sys.stdin)' 2>/dev/null; }
