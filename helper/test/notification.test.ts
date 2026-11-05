@@ -27,6 +27,17 @@ describe("hook notification", () => {
     ]);
   });
 
+  test("a permission prompt in a session with no channel yet makes the channel and posts there", async () => {
+    const k = await daemonKit();
+    await k.connected();
+    await k.register(SID);
+    expect(await k.cli(["hook", "notification"], { stdin: hookInput("permission_prompt") })).toEqual({ code: 0, out: "", err: "" });
+    await waitFor(() => k.daemon.sessions.get(SID)?.channelId != null);
+    const channelId = k.daemon.sessions.get(SID)!.channelId!;
+    await waitFor(() => k.rest.posted(channelId).length === 1);
+    expect(k.rest.posted(channelId)[0]!.content).toBe(`<@${OWNER_ID}> Claude needs your permission to use Bash`);
+  });
+
   test("idle_prompt and auth_success post nothing", async () => {
     const k = await daemonKit();
     await k.connected();

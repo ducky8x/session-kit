@@ -275,6 +275,21 @@ describe("question timing", () => {
     expect(posted[0]!.allowed_mentions).toEqual({ parse: [], users: [OWNER_ID] });
   });
 
+  test("a session whose chat has no channel yet gets one for its question at 2:00", async () => {
+    const k = await inboundKit();
+    const id = "eeee5555-0000-4000-8000-000000000005";
+    await k.register(id);
+    k.claude.addInteractive(id);
+    expect((await k.cli(["hook", "pre-ask"], { stdin: preAsk(id) })).code).toBe(0);
+    await k.clock.advance(2 * MINUTE);
+    await k.settle();
+    const channelId = k.daemon.sessions.get(id)!.channelId;
+    expect(channelId).not.toBeNull();
+    const posted = k.rest.posted(channelId!);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]!.content.startsWith(`<@${OWNER_ID}> This session is waiting for an answer:`)).toBe(true);
+  });
+
   test("a keyboard answer at 1:30 posts nothing, ever", async () => {
     const k = await asked();
     await k.clock.advance(90_000);
