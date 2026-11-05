@@ -9,25 +9,30 @@ export const AGENTS_TIMEOUT_MS = 5000;
 /** Only the end of a transcript is read for its title. */
 export const TRANSCRIPT_TAIL_BYTES = 256 * 1024;
 
-/** One row of `claude agents --json`. Every field is optional: anything else the CLI adds is ignored. */
+/**
+ * One row of `claude agents --json`. Every field is optional: anything else the CLI adds (`startedAt`, and
+ * `waitingFor` while `status` is waiting) is ignored. The rows carry no entry point, so whether a session is
+ * open in the desktop app, in VS Code or in a terminal comes only from the hooks' `CLAUDE_CODE_ENTRYPOINT`.
+ */
 export interface AgentEntry {
   /** The short id (8 hex), on background sessions only. */
   id?: string;
   sessionId?: string;
+  /** Only while the process is alive. */
   pid?: number;
   cwd?: string;
-  /** "interactive" or "background". */
+  /** "interactive" (the desktop app, VS Code or a terminal) or "background". */
   kind?: string;
   name?: string;
-  /** working, done or blocked (background sessions). */
+  /** Background sessions only: working, blocked, done, failed or stopped. */
   state?: string;
-  /** busy or idle. */
+  /** Only while the process is alive: busy, waiting or idle. */
   status?: string;
 }
 
 /**
- * Read the list of sessions `claude agents --json` prints. The format is undocumented, so every field is
- * optional and anything else is ignored. Null means "not a list this code understands".
+ * Read the list of sessions `claude agents --json` prints. The format may change between releases, so every
+ * field is optional and anything else is ignored. Null means "not a list this code understands".
  */
 export function parseAgentList(stdout: string): AgentEntry[] | null {
   if (stdout.trim() === "") return null;

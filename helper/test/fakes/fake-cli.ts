@@ -6,10 +6,11 @@ import { FakeProcessRunner } from "./fake-process.ts";
  * A stand-in for the `claude` CLI that behaves the way the real one was seen to behave, and refuses (and
  * remembers) anything the real one would not take:
  *
- *  - `agents --json [--all]` lists sessions as JSON rows. A background row has `id` (8 hex), `sessionId`,
- *    `kind: "background"`, `cwd`, `name`, `state` (working | done | blocked), `status` (idle | busy | null) and
- *    `pid` (null once stopped). An interactive row has `pid`, `sessionId`, `kind: "interactive"`, `name`,
- *    `status` and no `id`. Without `--all` only live rows are listed.
+ *  - `agents --json [--all]` lists sessions as JSON rows. Every row has `cwd`, `kind`, `startedAt`,
+ *    `sessionId` and `name`, plus `pid` and `status` (idle | busy | waiting) while its process is alive. A
+ *    background row also has `id` (8 hex) and `state` (working | blocked | done | failed | stopped). An
+ *    interactive row (the desktop app, VS Code or a terminal) has no `id` and no `state`. Without `--all`, a
+ *    background row whose process is gone is listed only while it is working or blocked.
  *  - `--bg --resume <id|sessionId> <prompt>` with NO other flag wakes a stopped session under its own id. On a
  *    session whose process is alive it starts a COPY under a new id. ANY extra flag also starts a copy, and so
  *    does a session id that is not all lowercase.
@@ -19,8 +20,11 @@ import { FakeProcessRunner } from "./fake-process.ts";
  */
 export const BIN = "/opt/tools/claude";
 
-export type RowState = "working" | "done" | "blocked";
-export type RowStatus = "idle" | "busy" | null;
+export type RowState = "working" | "blocked" | "done" | "failed" | "stopped";
+export type RowStatus = "idle" | "busy" | "waiting" | null;
+
+/** When every fake session started (the real CLI prints the time each one did). */
+const STARTED_AT = 1_762_300_000_000;
 
 export interface FakeRow {
   id?: string;
@@ -182,8 +186,10 @@ export class FakeCli extends FakeProcessRunner {
       return this.fail(64, "error: bad arguments");
     }
     if (this.listCode !== 0) return this.fail(this.listCode, "error: list failed");
-    const visible = this.rows.filter((r) => all || r.pid !== null);
-    return this.ok(JSON.stringify(visible.map(toJson)));
+    const visible = this.rows.filter(
+      (r) => all || r.pid !== null || (r.kind === "background" && (r.state === "working" || r.state === "blocked")),
+    );
+    return this.ok(`${JSON.stringify(visible.map(toJson), null, 2)}\n`);
   }
 
   private stop(args: string[]): RunResult {
@@ -267,8 +273,16 @@ export class FakeCli extends FakeProcessRunner {
 }
 
 function toJson(row: FakeRow): Record<string, unknown> {
-  if (row.kind === "interactive") {
-    return { pid: row.pid, sessionId: row.sessionId, kind: "interactive", name: row.name, status: row.status };
-  }
-  return { id: row.id, sessionId: row.sessionId, kind: "background", cwd: row.cwd, name: row.name, state: row.state, status: row.status, pid: row.pid };
+  const alive = row.pid !== null;
+  return {
+    ...(alive ? { pid: row.pid } : {}),
+    ...(row.kind === "background" ? { id: row.id } : {}),
+    cwd: row.cwd,
+    kind: row.kind,
+    startedAt: STARTED_AT,
+    sessionId: row.sessionId,
+    name: row.name,
+    ...(alive && row.status !== null ? { status: row.status } : {}),
+    ...(row.kind === "background" ? { state: row.state } : {}),
+  };
 }
