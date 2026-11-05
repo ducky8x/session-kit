@@ -9,6 +9,10 @@ const ENTER = "\r";
 const BACKSPACE = "\u007f";
 const CTRL_C = "\u0003";
 const CTRL_D = "\u0004";
+const ESC = "\u001b";
+/** What a terminal in bracketed-paste mode sends around pasted text. */
+const PASTE_START = `${ESC}[200~`;
+const PASTE_END = `${ESC}[201~`;
 
 /** Start reading from a fake terminal. */
 function start() {
@@ -73,6 +77,102 @@ describe("readSecret at a terminal", () => {
     term.type(`${TOKEN}${ENTER}extra`);
     expect(await value).toBe(TOKEN);
     expectRestored(term);
+  });
+});
+
+describe("readSecret with pastes and escape sequences", () => {
+  test("a bracketed paste then Return in one chunk gives just the pasted text", async () => {
+    const { term, value } = start();
+    term.type(`${PASTE_START}${TOKEN}${PASTE_END}${ENTER}`);
+    expect(await value).toBe(TOKEN);
+    expectRestored(term);
+  });
+
+  test("a bracketed paste then Return gives just the pasted text wherever the chunks split", async () => {
+    const input = `${PASTE_START}${TOKEN}${PASTE_END}${ENTER}`;
+    for (let at = 1; at < input.length; at++) {
+      const { term, value } = start();
+      term.type(input.slice(0, at), input.slice(at));
+      expect({ at, value: await value }).toEqual({ at, value: TOKEN });
+    }
+    const { term, value } = start();
+    term.type(...input);
+    expect(await value).toBe(TOKEN);
+  });
+
+  test("a paste whose text ends in a newline, before the end marker, gives just the token", async () => {
+    for (const newline of ["\r", "\n", "\r\n"]) {
+      const one = start();
+      one.term.type(`${PASTE_START}${TOKEN}${newline}${PASTE_END}`);
+      expect(await one.value).toBe(TOKEN);
+      expectRestored(one.term);
+      const split = start();
+      split.term.type(`${PASTE_START}${TOKEN}${newline}`, PASTE_END);
+      expect(await split.value).toBe(TOKEN);
+      expectRestored(split.term);
+    }
+  });
+
+  test("arrow keys and other CSI sequences are dropped", async () => {
+    const { term, value } = start();
+    // left, right, Ctrl-Up, Delete, focus in and out, an SGR mouse click
+    term.type("ab", `${ESC}[D`, `${ESC}[C`, `${ESC}[1;5A`, `${ESC}[3~`, `${ESC}[I`, `${ESC}[O`, "cd", `${ESC}[<0;10;5M`, ENTER);
+    expect(await value).toBe("abcd");
+  });
+
+  test("arrow keys in application mode (ESC O A) are dropped", async () => {
+    const { term, value } = start();
+    term.type("ab", `${ESC}OA`, `${ESC}OD`, "cd", ENTER);
+    expect(await value).toBe("abcd");
+  });
+
+  test("a lone ESC (the Escape key) is dropped and what comes next is kept", async () => {
+    const one = start();
+    one.term.type(ESC, TOKEN, ENTER);
+    expect(await one.value).toBe(TOKEN);
+    const twice = start();
+    twice.term.type("ab", ESC, ESC, "cd", ENTER);
+    expect(await twice.value).toBe("abcd");
+    const thenPaste = start();
+    thenPaste.term.type(ESC, `${PASTE_START}${TOKEN}${PASTE_END}`, ENTER);
+    expect(await thenPaste.value).toBe(TOKEN);
+  });
+
+  test("ESC then Return in one chunk ends the input", async () => {
+    const { term, value } = start();
+    term.type(`ab${ESC}${ENTER}`);
+    expect(await value).toBe("ab");
+    expectRestored(term);
+  });
+
+  test("ESC and the character after it in one chunk (Alt plus a key) are dropped together", async () => {
+    const { term, value } = start();
+    term.type("ab", `${ESC}x`, "cd", ENTER);
+    expect(await value).toBe("abcd");
+  });
+
+  test("Return and Ctrl-C still work in the middle of an escape sequence", async () => {
+    const enter = start();
+    enter.term.type(`ab${ESC}[1${ENTER}`);
+    expect(await enter.value).toBe("ab");
+    expectRestored(enter.term);
+    const cancel = start();
+    cancel.term.type(`ab${ESC}[12`, CTRL_C);
+    await expect(cancel.value).rejects.toThrow("Canceled.");
+    expectRestored(cancel.term);
+  });
+
+  test("other control characters and invisible characters are dropped", async () => {
+    const { term, value } = start();
+    // tab, NUL, Ctrl-U, zero-width space, byte order mark, a C1 control
+    term.type("a\tb\u0000c\u0015d​e﻿f\u009bg", ENTER);
+    expect(await value).toBe("abcdefg");
+  });
+
+  test("other printable characters are kept, and Backspace removes a whole emoji", async () => {
+    const { term, value } = start();
+    term.type("é😀ü😀", BACKSPACE, ENTER);
+    expect(await value).toBe("é😀ü");
   });
 });
 
