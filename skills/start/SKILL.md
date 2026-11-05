@@ -45,7 +45,7 @@ Ask at the start of a new session, before acting on the user's first message. Sk
 
 ## How to ask
 
-Make one `AskUserQuestion` call with two questions. Don't mark any option "(Recommended)": this is the user's choice.
+Make one `AskUserQuestion` call with two questions, or three when Discord hasn't been offered yet (see "Discord offer"). Don't mark any option "(Recommended)": this is the user's choice.
 
 1. Question "Which workflow should this session run on?", header "Workflow":
    - **Single-agent**: "One agent does all the work itself."
@@ -53,21 +53,39 @@ Make one `AskUserQuestion` call with two questions. Don't mark any option "(Reco
 2. Question "Should this session run autonomously?", header "Autonomous":
    - **No**: "Ask me when a decision is mine to make."
    - **Yes**: "Don't ask me anything; decide, note the assumption, keep going."
+3. Only when the session-start hook printed `Discord: not offered yet.`: question "Set up Discord now?", header "Discord". Mark neither option as the default:
+   - **Yes**: "Set up a private Discord server where each session gets a channel for its updates and your replies. Runs after these questions."
+   - **No**: "Don't set it up. You can turn it on later with /discord on."
 
 Then, in the same turn:
 
-1. Write the state file: `workflow`, plus `"autonomous": { "on": false }` if the answer was No.
+1. Write the state file: `workflow`, plus `"autonomous": { "on": false }` if the Autonomous answer was No.
 2. Say the result in one line, for example `Workflow: multi-agent · Autonomous: ON`.
-3. If the answer was Yes, invoke `session-kit:autonomous-mode`. That turns it on for the whole session.
+3. If the Autonomous answer was Yes, invoke `session-kit:autonomous-mode`. That turns it on for the whole session.
 4. If a `.agentcontext` file exists in the current folder or any parent folder, invoke `session-kit:load-context`. It keeps its brief short when a request is waiting. To check:
 
    ```bash
    d=$PWD; while :; do [ -e "$d/.agentcontext" ] && { echo "$d/.agentcontext"; break; }; [ "$d" = / ] && break; d=$(dirname "$d"); done
    ```
 
-5. Carry on with the user's first request.
+5. If Discord was offered, act on the answer (see "Discord offer").
+6. Carry on with the user's first request.
 
 Follow the same steps when you skipped the questions because the first message settled them.
+
+## Discord offer
+
+On macOS, while `~/.claude/session-kit/discord/config.json` doesn't exist (Discord was never offered or set up), the session-start hook prints `Discord: not offered yet.` Only then add the third question. Ask it even when the first message settled the other two, and only once in a session: a later `/start` doesn't ask it again.
+
+- **Yes**: after steps 1 to 4, invoke `session-kit:discord`, which runs its guided setup. The user's first request waits until the setup is done or the user sets it aside.
+- **No**: save the answer so it isn't offered again, then say in one line that Discord can be turned on later with `/discord on`:
+
+  ```bash
+  mkdir -p ~/.claude/session-kit/discord && chmod 700 ~/.claude/session-kit/discord
+  [ -e ~/.claude/session-kit/discord/config.json ] || printf '{"offered":true,"enabled":false}\n' > ~/.claude/session-kit/discord/config.json
+  ```
+
+- **No answer**: write nothing and skip the setup, so the next session asks again. The rules for unanswered questions below don't pick an answer for this one.
 
 ## If the question goes unanswered
 
