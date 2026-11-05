@@ -8,6 +8,7 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SESSION_START="$ROOT/hooks/session-start.sh"
 SUBAGENT_START="$ROOT/hooks/subagent-start.sh"
+DISCORD="$ROOT/hooks/discord.sh"
 HOOKS_JSON="$ROOT/hooks/hooks.json"
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/session-kit-test.XXXXXX") || exit 1
@@ -19,6 +20,12 @@ H=""        # HOME for the current test
 OUT=""      # stdout of the last hook run
 STATUS=0    # exit status of the last hook run
 TEST_LOCALE=C
+# The system name the Discord hook sees (its SK_DISCORD_UNAME override).
+# Linux by default, so the tests print the same on every system; an empty
+# value lets the hook ask uname.
+TEST_UNAME=Linux
+TEST_PLUGIN_ROOT=""  # CLAUDE_PLUGIN_ROOT for the hooks; empty means unset
+TEST_ENTRYPOINT=""   # CLAUDE_CODE_ENTRYPOINT for the hooks
 
 # A UTF-8 locale, to check the hooks under the locale a user usually has.
 UTF8_LOCALE=$(locale -a 2>/dev/null | grep -i -x -m 1 -e 'C.UTF-8' -e 'C.utf8' -e 'en_US.UTF-8' -e 'en_US.utf8')
@@ -35,9 +42,13 @@ new_home() {
 state_dir() { printf '%s' "$H/.claude/session-kit/state"; }
 rules_file() { printf '%s' "$H/.claude/session-kit/rules.md"; }
 
-# run_hook <script> <stdin text>
+# run_hook <script> <stdin text> [hook arguments...]
 run_hook() {
-  OUT=$(printf '%s' "$2" | env -i HOME="$H" PATH="$PATH" LC_ALL="$TEST_LOCALE" "$1" 2>/dev/null)
+  local script=$1 input=$2
+  shift 2
+  OUT=$(printf '%s' "$input" | env -i HOME="$H" PATH="$PATH" LC_ALL="$TEST_LOCALE" \
+    SK_DISCORD_UNAME="$TEST_UNAME" CLAUDE_PLUGIN_ROOT="$TEST_PLUGIN_ROOT" \
+    CLAUDE_CODE_ENTRYPOINT="$TEST_ENTRYPOINT" "$script" "$@" 2>/dev/null)
   STATUS=$?
 }
 
@@ -65,9 +76,12 @@ json_valid() { printf '%s' "$OUT" | python3 -c 'import json,sys;json.load(sys.st
 START_LINE="invoke the session-kit:start skill"
 HINT="no rules file yet"
 NO_ASK="don't ask the startup questions again"
+OFFER_LINE="Discord: not offered yet."
+SETUP_LINE="Discord: turned on, but the helper isn't installed."
+UPDATE_LINE="Updating the Discord helper to"
 
 echo "== files"
-for f in "$SESSION_START" "$SUBAGENT_START"; do
+for f in "$SESSION_START" "$SUBAGENT_START" "$DISCORD"; do
   if [ -x "$f" ]; then pass "$(basename "$f") is executable"; else fail "$(basename "$f") is executable"; fi
 done
 if python3 - "$HOOKS_JSON" <<'PY' 2>/dev/null
@@ -79,6 +93,26 @@ assert "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh" in ss["hooks"][0]["command
 assert "${CLAUDE_PLUGIN_ROOT}/hooks/subagent-start.sh" in hooks["SubagentStart"][0]["hooks"][0]["command"]
 PY
 then pass "hooks.json wires both hooks through CLAUDE_PLUGIN_ROOT"; else fail "hooks.json wires both hooks through CLAUDE_PLUGIN_ROOT"; fi
+if python3 - "$HOOKS_JSON" <<'PY' 2>/dev/null
+import json, sys
+hooks = json.load(open(sys.argv[1]))["hooks"]
+want = {
+    "SessionEnd": (None, "session-end"),
+    "Notification": ("permission_prompt|elicitation_dialog", "notification"),
+    "PreToolUse": ("AskUserQuestion", "pre-ask"),
+    "PostToolUse": ("AskUserQuestion", "post-ask"),
+    "Stop": (None, "stop"),
+}
+for event, (matcher, arg) in want.items():
+    groups = hooks[event]
+    assert len(groups) == 1, event
+    assert groups[0].get("matcher") == matcher, event
+    handler = groups[0]["hooks"][0]
+    assert handler["type"] == "command", event
+    assert handler["command"] == '"${CLAUDE_PLUGIN_ROOT}/hooks/discord.sh" ' + arg, event
+    assert handler["timeout"] == 10, event
+PY
+then pass "hooks.json wires the Discord events to discord.sh"; else fail "hooks.json wires the Discord events to discord.sh"; fi
 
 echo "== session-start: startup and clear"
 new_home startup
@@ -271,6 +305,306 @@ expect_status0 "subagent-start with garbage stdin exits 0"
 OUT=$(printf '%s' "$(subagent_input s-sub)" | env -i PATH="$PATH" "$SUBAGENT_START" 2>/dev/null); STATUS=$?
 expect_status0 "subagent-start with unset HOME exits 0"
 if [ -z "$OUT" ] || json_valid; then pass "subagent-start with unset HOME prints nothing or valid JSON"; else fail "subagent-start with unset HOME prints nothing or valid JSON" "$OUT"; fi
+
+discord_dir() { printf '%s' "$H/.claude/session-kit/discord"; }
+fake_bin() { printf '%s' "$H/.claude/session-kit/bin/sk-discord"; }
+write_config() { mkdir -p "$(discord_dir)"; printf '%s\n' "$1" > "$(discord_dir)/config.json"; }
+event_input() { printf '{"session_id":"s-d","transcript_path":"/tmp/t.jsonl","cwd":"/tmp","hook_event_name":"%s"}' "$1"; }
+count_of() { printf '%s' "$OUT" | grep -c -F -e "$1"; }
+expect_empty() { if [ -z "$OUT" ]; then pass "$1"; else fail "$1" "printed: $OUT"; fi; }
+expect_file_has() { # <name> <file> <text>
+  if [ -f "$2" ] && grep -q -F -e "$3" "$2"; then pass "$1"; else fail "$1" "$2 lacks: $3"; fi
+}
+expect_no_file() { if [ -e "$2" ]; then fail "$1" "$2: $(cat "$2")"; else pass "$1"; fi; }
+# wait_for <file>: up to 3 seconds for a file written in the background
+wait_for() { local i=0; while [ ! -s "$1" ] && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done; }
+
+# A stand-in for sk-discord. It records each call in $HOME/fake/ and acts on
+# files there: version (what --version prints; the plugin's own version at
+# first), sleep (hang for 30 seconds), fail (exit 1), output-<event> (what a
+# hook call prints) and update-sleep (an update that takes 10 seconds).
+install_fake() {
+  mkdir -p "$(dirname "$(fake_bin)")" "$H/fake"
+  printf '%s\n' "$REPO_VERSION" > "$H/fake/version"
+  cat > "$(fake_bin)" <<'SH'
+#!/usr/bin/env bash
+f="$HOME/fake"
+printf '%s\n' "$*" >> "$f/calls"
+case ${1:-} in
+  --version)
+    cat "$f/version"
+    ;;
+  hook)
+    cat > "$f/stdin-$2"
+    printf '%s\n' "${CLAUDE_CODE_ENTRYPOINT:-}" > "$f/entrypoint-$2"
+    if [ -e "$f/sleep" ]; then printf 'partial output\n'; sleep 30; fi
+    if [ -e "$f/fail" ]; then printf 'error output\n'; exit 1; fi
+    if [ -f "$f/output-$2" ]; then cat "$f/output-$2"; else printf 'fake %s output\n' "$2"; fi
+    ;;
+  update)
+    printf '%s\n' "$*" >> "$f/updates"
+    printf 'updating to %s\n' "${3:-}"
+    if [ -e "$f/update-sleep" ]; then sleep 10; fi
+    ;;
+esac
+exit 0
+SH
+  chmod 755 "$(fake_bin)"
+}
+
+# A plugin folder whose plugin.json has version 0.2.0.
+PLUGIN_020="$TMP_ROOT/plugin-0.2.0"
+mkdir -p "$PLUGIN_020/.claude-plugin"
+printf '{\n  "name": "session-kit",\n  "version": "0.2.0"\n}\n' > "$PLUGIN_020/.claude-plugin/plugin.json"
+REPO_VERSION=$(sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' "$ROOT/.claude-plugin/plugin.json" | head -n 1)
+
+DISCORD_EVENTS="session-start session-end notification pre-ask post-ask stop"
+
+echo "== discord: no helper installed"
+new_home dnone
+for ev in $DISCORD_EVENTS; do
+  run_hook "$DISCORD" "$(event_input "$ev")" "$ev"
+  expect_status0 "$ev with no helper exits 0"
+  expect_empty "$ev with no helper prints nothing (Linux)"
+done
+run_hook "$DISCORD" "$(start_input s-d startup)"
+expect_status0 "no event name exits 0"
+expect_empty "no event name prints nothing"
+run_hook "$DISCORD" "$(start_input s-d startup)" bogus
+expect_status0 "an unknown event exits 0"
+expect_empty "an unknown event prints nothing"
+OUT=$(printf '%s' "$(start_input s-d startup)" | env -i PATH="$PATH" SK_DISCORD_UNAME=Darwin "$DISCORD" session-start 2>/dev/null); STATUS=$?
+expect_status0 "unset HOME exits 0"
+expect_empty "unset HOME prints nothing"
+run_hook "$SESSION_START" "$(start_input s-d startup)"
+expect_lacks "session-start on Linux with no config doesn't offer Discord" "$OFFER_LINE"
+
+echo "== discord: first-run offer"
+TEST_UNAME=Darwin
+new_home doffer
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+expect_status0 "first run on macOS exits 0"
+expect_has "first run on macOS with no config.json offers Discord" "$OFFER_LINE"
+expect_has "the offer names the start question" "Set up Discord now?"
+expect_lacks "the offer isn't the set-up line" "$SETUP_LINE"
+for ev in session-end notification pre-ask post-ask stop; do
+  run_hook "$DISCORD" "$(event_input "$ev")" "$ev"
+  expect_empty "$ev prints nothing on a first run on macOS"
+done
+for src in clear ""; do
+  run_hook "$DISCORD" "$(start_input s-d "$src")" session-start
+  expect_has "source '$src' offers Discord" "$OFFER_LINE"
+done
+for src in compact resume fork; do
+  run_hook "$DISCORD" "$(start_input s-d "$src")" session-start
+  expect_empty "source $src doesn't offer Discord"
+done
+run_hook "$SESSION_START" "$(start_input s-d startup)"
+if [ "$(count_of "$OFFER_LINE")" -eq 1 ]; then pass "session-start prints the offer once"; else fail "session-start prints the offer once" "count: $(count_of "$OFFER_LINE")"; fi
+expect_has "session-start still asks for the start skill" "$START_LINE"
+make_file "$(rules_file)" 8000
+run_hook "$SESSION_START" "$(start_input s-d startup)"
+expect_has "the offer follows an 8000-byte rules file" "$OFFER_LINE"
+expect_under "startup output with an 8000-byte rules file and the offer stays under 10,000" 10000
+if [ -e "$(discord_dir)" ]; then fail "the offer writes nothing" "$(discord_dir) exists"; else pass "the offer writes nothing"; fi
+
+write_config '{"offered":true,"enabled":false}'
+for ev in $DISCORD_EVENTS; do
+  run_hook "$DISCORD" "$(event_input "$ev")" "$ev"
+  expect_empty "$ev prints nothing once offered and declined"
+done
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+expect_empty "offered: true, enabled: false prints nothing"
+write_config '{
+  "offered": true,
+  "enabled": false
+}'
+run_hook "$SESSION_START" "$(start_input s-d startup)"
+expect_lacks "a declined offer isn't repeated" "$OFFER_LINE"
+expect_lacks "a declined offer gives no set-up line" "$SETUP_LINE"
+
+TEST_UNAME=""
+new_home dreal
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+if [ "$(uname -s)" = Darwin ]; then
+  expect_has "with no override, uname Darwin offers Discord" "$OFFER_LINE"
+else
+  expect_empty "with no override, uname $(uname -s) offers nothing"
+fi
+TEST_UNAME=Darwin
+
+echo "== discord: turned on but not installed"
+new_home dsetup
+write_config '{
+  "enabled": true,
+  "offered": true,
+  "guildId": "123"
+}'
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+expect_status0 "enabled without a helper exits 0"
+expect_has "enabled without a helper gives the set-up line" "$SETUP_LINE"
+expect_has "the set-up line names the discord skill" "session-kit:discord"
+expect_lacks "enabled without a helper doesn't offer" "$OFFER_LINE"
+for src in clear resume fork; do
+  run_hook "$DISCORD" "$(start_input s-d "$src")" session-start
+  expect_has "source $src gives the set-up line" "$SETUP_LINE"
+done
+run_hook "$DISCORD" "$(start_input s-d compact)" session-start
+expect_empty "compact gives no set-up line"
+for ev in session-end notification pre-ask post-ask stop; do
+  run_hook "$DISCORD" "$(event_input "$ev")" "$ev"
+  expect_empty "$ev prints nothing when enabled without a helper"
+done
+run_hook "$SESSION_START" "$(start_input s-d startup)"
+expect_has "session-start passes on the set-up line" "$SETUP_LINE"
+mkdir -p "$(dirname "$(fake_bin)")"
+printf '#!/bin/sh\necho should not run\n' > "$(fake_bin)"
+chmod 644 "$(fake_bin)"
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+expect_has "a helper file that isn't executable counts as not installed" "$SETUP_LINE"
+expect_lacks "a helper file that isn't executable isn't run" "should not run"
+rm -f "$(fake_bin)"; mkdir -p "$(fake_bin)"
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+expect_has "a folder in the helper's place counts as not installed" "$SETUP_LINE"
+TEST_UNAME=Linux
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+expect_empty "enabled without a helper on Linux prints nothing"
+TEST_UNAME=Darwin
+
+echo "== discord: helper installed"
+new_home dfake
+install_fake
+write_config '{"enabled":true,"offered":true}'
+TEST_ENTRYPOINT=claude-desktop
+for ev in $DISCORD_EVENTS; do
+  input=$(printf '{\n  "session_id": "s-d",\n\t"hook_event_name": "%s",\n  "text": "quotes \\" and caf\xc3\xa9 \xe2\x9c\x93"\n}' "$ev")
+  printf '%s' "$input" > "$TMP_ROOT/expected-stdin"
+  run_hook "$DISCORD" "$input" "$ev"
+  expect_status0 "$ev with the helper exits 0"
+  if [ "$OUT" = "fake $ev output" ]; then pass "$ev prints the helper's output"; else fail "$ev prints the helper's output" "got: $OUT"; fi
+  expect_file_has "$ev runs sk-discord hook $ev" "$H/fake/calls" "hook $ev"
+  if cmp -s "$TMP_ROOT/expected-stdin" "$H/fake/stdin-$ev"; then pass "$ev passes stdin through byte for byte"; else fail "$ev passes stdin through byte for byte"; fi
+done
+expect_file_has "the helper sees the entry point" "$H/fake/entrypoint-session-start" "claude-desktop"
+TEST_ENTRYPOINT=""
+
+printf '{"decision":"block","reason":"Discord message(s) for this session: \\"hi\\""}\n' > "$H/fake/output-stop"
+run_hook "$DISCORD" "$(event_input Stop)" stop
+if json_valid && has '"decision":"block"'; then pass "the stop hook passes the block JSON through intact"; else fail "the stop hook passes the block JSON through intact" "$OUT"; fi
+printf 'Discord: #s-d-desktop (Desktop)\nListener: sk-discord listen --session s-d\n' > "$H/fake/output-session-start"
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+if [ "$OUT" = "$(cat "$H/fake/output-session-start")" ]; then pass "session-start output is printed as the helper wrote it"; else fail "session-start output is printed as the helper wrote it" "$OUT"; fi
+
+rm -f "$(discord_dir)/config.json"
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+expect_lacks "with the helper installed, the hook doesn't print its own offer" "$OFFER_LINE"
+write_config '{"enabled":true,"offered":true}'
+
+rm -f "$H/fake/calls"
+start_json=$(printf '{"session_id":"s-ss",\n"cwd":"/tmp",\t"hook_event_name":"SessionStart","source":"startup"}')
+printf '%s' "$start_json" > "$TMP_ROOT/expected-stdin"
+run_hook "$SESSION_START" "$start_json"
+expect_status0 "session-start with the helper exits 0"
+expect_has "session-start keeps its own lines" "Session id: s-ss"
+expect_has "session-start still asks for the start skill" "$START_LINE"
+expect_has "session-start appends the helper's lines" "Discord: #s-d-desktop (Desktop)"
+if cmp -s "$TMP_ROOT/expected-stdin" "$H/fake/stdin-session-start"; then pass "session-start passes its stdin on unchanged"; else fail "session-start passes its stdin on unchanged"; fi
+if [ "$(printf '%s\n' "$OUT" | tail -n 1)" = "Listener: sk-discord listen --session s-d" ]; then pass "the helper's lines come last"; else fail "the helper's lines come last" "$(printf '%s\n' "$OUT" | tail -n 1)"; fi
+
+touch "$H/fake/fail"
+for ev in session-start stop; do
+  run_hook "$DISCORD" "$(event_input "$ev")" "$ev"
+  expect_status0 "$ev exits 0 when the helper fails"
+  expect_lacks "$ev prints nothing from a failed helper call" "error output"
+done
+rm -f "$H/fake/fail"
+
+touch "$H/fake/sleep"
+for ev in stop session-start; do
+  SECONDS=0
+  run_hook "$DISCORD" "$(event_input "$ev")" "$ev"
+  elapsed=$SECONDS
+  if [ "$elapsed" -le 6 ]; then pass "$ev returns within 6 seconds when the helper hangs (${elapsed}s)"; else fail "$ev returns within 6 seconds when the helper hangs" "${elapsed}s"; fi
+  expect_status0 "$ev exits 0 when the helper hangs"
+  expect_lacks "$ev prints nothing from a helper that was stopped" "partial output"
+done
+rm -f "$H/fake/sleep"
+
+echo "== discord: version follow"
+new_home dver
+install_fake
+echo 0.1.0 > "$H/fake/version"
+write_config '{"enabled":true,"offered":true}'
+TEST_PLUGIN_ROOT=$PLUGIN_020
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+expect_status0 "a version mismatch exits 0"
+expect_has "the helper's output still comes first" "fake session-start output"
+if [ "$(count_of "$UPDATE_LINE 0.2.0.")" -eq 1 ]; then pass "a version mismatch prints one update line"; else fail "a version mismatch prints one update line" "$OUT"; fi
+wait_for "$H/fake/updates"
+if [ "$(cat "$H/fake/updates" 2>/dev/null)" = "update --version 0.2.0" ]; then pass "the helper gets update --version 0.2.0"; else fail "the helper gets update --version 0.2.0" "$(cat "$H/fake/updates" 2>/dev/null)"; fi
+wait_for "$(discord_dir)/helper.log"
+expect_file_has "the update's output goes to helper.log" "$(discord_dir)/helper.log" "updating to 0.2.0"
+
+printf 'Discord: #s-d-cli (CLI)' > "$H/fake/output-session-start"
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+if printf '%s\n' "$OUT" | grep -q -x -F "$UPDATE_LINE 0.2.0."; then pass "the update line gets a line of its own"; else fail "the update line gets a line of its own" "$OUT"; fi
+expect_has "helper output without a final newline is kept whole" "Discord: #s-d-cli (CLI)"
+rm -f "$H/fake/output-session-start"
+sleep 0.5
+
+rm -f "$H/fake/updates"
+for ev in stop notification; do
+  run_hook "$DISCORD" "$(event_input "$ev")" "$ev"
+  expect_lacks "$ev doesn't follow the version" "$UPDATE_LINE"
+done
+sleep 0.5
+expect_no_file "other events start no update" "$H/fake/updates"
+
+echo 0.2.0 > "$H/fake/version"
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+expect_lacks "matching versions print no update line" "$UPDATE_LINE"
+printf 'sk-discord v0.2.0\n' > "$H/fake/version"
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+expect_lacks "a version printed with a name and a v still matches" "$UPDATE_LINE"
+: > "$H/fake/version"
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+expect_lacks "a helper that prints no version gets no update" "$UPDATE_LINE"
+echo 0.1.0 > "$H/fake/version"
+
+write_config '{"enabled":false,"offered":true}'
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+expect_lacks "Discord turned off: no update line" "$UPDATE_LINE"
+rm -f "$(discord_dir)/config.json"
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+expect_lacks "no config.json: no update line" "$UPDATE_LINE"
+sleep 0.5
+expect_no_file "matching versions or Discord off start no update" "$H/fake/updates"
+
+write_config '{"enabled":true,"offered":true}'
+TEST_PLUGIN_ROOT=""
+echo "$REPO_VERSION" > "$H/fake/version"
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+expect_lacks "without CLAUDE_PLUGIN_ROOT, the hook's own plugin.json is used (same version)" "$UPDATE_LINE"
+echo 0.0.1 > "$H/fake/version"
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+expect_has "without CLAUDE_PLUGIN_ROOT, the hook's own plugin.json is used (older helper)" "$UPDATE_LINE $REPO_VERSION."
+wait_for "$H/fake/updates"
+expect_file_has "the update goes to the plugin's own version" "$H/fake/updates" "update --version $REPO_VERSION"
+echo 0.1.0 > "$H/fake/version"
+rm -f "$H/fake/updates"
+
+TEST_PLUGIN_ROOT=$PLUGIN_020
+touch "$H/fake/update-sleep"
+SECONDS=0
+run_hook "$DISCORD" "$(start_input s-d startup)" session-start
+elapsed=$SECONDS
+if [ "$elapsed" -le 3 ]; then pass "a slow update runs detached (${elapsed}s)"; else fail "a slow update runs detached" "${elapsed}s"; fi
+expect_has "a slow update still prints its line" "$UPDATE_LINE 0.2.0."
+rm -f "$H/fake/update-sleep"
+run_hook "$SESSION_START" "$(start_input s-d startup)"
+expect_has "session-start passes on the update line" "$UPDATE_LINE 0.2.0."
+TEST_PLUGIN_ROOT=""
+TEST_UNAME=Linux
 
 echo
 printf '%d passed, %d failed\n' "$passed" "$failed"
