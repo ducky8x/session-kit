@@ -53,6 +53,7 @@ After a summary of the chat (compaction), a resume or a fork, the hook restates 
 | `/session-kit:create-context` | Writes a `.agentcontext` brief for the current project and keeps it out of git. |
 | `/session-kit:update-context` | Updates `.agentcontext` with what the session finished and what's left, and prunes stale lines. |
 | `/session-kit:brainstorm` | Plans a task with you before building it. Claude researches the project, asks rounds of questions, writes a spec to `.task/<name>.md`, and starts building only when you say go. |
+| `/session-kit:discord` | Connects your sessions to Discord (macOS only). `on` sets it up or turns it back on, `off` turns it off, `status` says what's wrong if it isn't working, and `update` reinstalls the helper. See [Discord](#discord). |
 
 Claude also runs these skills on its own when a request matches, such as "go autonomous" or "catch me up".
 
@@ -71,6 +72,24 @@ Ask Claude to brainstorm, plan or spec out a task ("let's brainstorm the export 
 The questions and the go-ahead run even when autonomous mode is on. Autonomous mode applies to the work after the go. If a round of questions goes unanswered, Claude takes the defaults, marks them as unanswered in the spec's Decisions log, and finishes the spec, but it still waits for your go before building anything.
 
 Each spec has a status (drafting, awaiting go-ahead, approved, in progress, done). When `/session-kit:load-context` briefs you on a project, it names the specs that aren't done yet.
+
+## Discord
+
+session-kit can give every interactive session its own channel in a private Discord server of yours. A small helper, `sk-discord`, runs in the background and keeps one bot in that server.
+
+- Each channel is named after its session, with a suffix for where the session runs: `-desktop` (the Claude desktop app), `-vs` (VS Code) or `-cli` (the terminal).
+- A session posts in its channel when work finishes, fails or needs you. What you type in the channel reaches that session; `stop`, `pause`, `resume` and `status` work as commands.
+- A channel with no messages for 7 days moves to an Archive category. After 30 days without messages it's deleted.
+
+The helper runs only on macOS.
+
+To turn it on, answer Yes when your first session after installing session-kit asks "Set up Discord now?", or run `/discord on` later. Claude takes you through the setup one step at a time: it installs the helper from this repository's GitHub releases, and you create the server and the bot. You paste the bot token only into `sk-discord setup token` in your own terminal, never into the chat. Claude never sees it, and the helper keeps it in the macOS Keychain.
+
+Keep Discord notifications on, and set the server to All Messages (server name > Notification Settings). The bot @mentions you only when a session is waiting on you, such as for a permission prompt or a question nobody answered at the keyboard. Keep the server to yourself: anyone else in it can read every post.
+
+`/discord status` shows whether the helper is connected and what to fix if it isn't. `/discord off` stops new channels and posts but keeps the setup, so `/discord on` turns it back on. After a plugin update, the session-start hook updates the helper to the plugin's version by itself.
+
+The helper is `~/.claude/session-kit/bin/sk-discord`. Its settings, session list and log are in `~/.claude/session-kit/discord/`, and a LaunchAgent, `~/Library/LaunchAgents/io.github.ducky8x.session-kit.discord.plist`, starts it at login.
 
 ## Your rules file
 
@@ -106,7 +125,7 @@ The tests run each hook with a temporary `HOME`, so they never touch your real `
 
 ## If you already have your own versions
 
-- **Skills with the same names** in `~/.claude/skills` (`start`, `autonomous-mode`, `load-context`, `create-context`, `update-context`, `brainstorm`): remove or rename them. Otherwise both copies load, Claude sees two skills for the same job, and the bare `/name` runs your copy.
+- **Skills with the same names** in `~/.claude/skills` (`start`, `autonomous-mode`, `load-context`, `create-context`, `update-context`, `brainstorm`, `discord`): remove or rename them. Otherwise both copies load, Claude sees two skills for the same job, and the bare `/name` runs your copy.
 - **SessionStart or SubagentStart hooks** in `~/.claude/settings.json` that ask setup questions or inject a rules file: remove them. Plugin hooks run alongside the hooks in your settings, so you'd get both. Move your rules into `~/.claude/session-kit/rules.md`.
 
 ## Reporting issues

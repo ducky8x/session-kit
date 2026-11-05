@@ -1,7 +1,7 @@
 {
   "name": "session-kit",
-  "version": "0.1.0",
-  "description": "Sets up each Claude Code session: single-agent or multi-agent, autonomous mode, standing rules for every session and subagent, per-project context files, and task specs you approve before building.",
+  "version": "0.2.0",
+  "description": "Sets up each Claude Code session: single-agent or multi-agent, autonomous mode, standing rules for every session and subagent, per-project context files, task specs you approve before building, and an optional Discord channel per session on macOS.",
   "author": {
     "name": "ducky8x",
     "url": "https://github.com/ducky8x"
@@ -16,7 +16,8 @@
     "subagents",
     "rules",
     "project-context",
-    "specs"
+    "specs",
+    "discord"
   ],
   "icon": "./.claude-plugin/icon.png",
   "documentationUrl": "https://github.com/ducky8x/session-kit#readme",

@@ -1,6 +1,6 @@
 ---
 name: discord
-description: Connect this session to Discord through session-kit's helper, sk-discord. The user's own private server gets a channel per session; the session posts there when work finishes or needs the user, and what the user types in the channel reaches the session. Use for /discord on, /discord off, /discord status and /discord update; when the startup question "Set up Discord now?" is answered Yes; when the session-start hook says Discord is turned on but not installed; when the hook prints a Discord channel and a listener command; and when a Discord listener event arrives. macOS only.
+description: Connect this session to Discord through session-kit's helper, sk-discord. The user's own private server gets a channel per session; the session posts there when work finishes or needs the user, and what the user types in the channel reaches the session. Use for /discord on, /discord off, /discord status and /discord update; when the startup question "Set up Discord now?" is answered Yes; when the session-start hook says Discord is on but not installed or not set up; when the hook prints a Discord channel and a listener command; and when a Discord listener event arrives. macOS only.
 ---
 
 # Discord
@@ -22,7 +22,7 @@ session-kit's Discord helper, `sk-discord`, runs in the background on the user's
 
 When the user typed a `/discord` command, run it; with no argument, treat it as `/discord status`. When this skill was loaded for another reason, go by that reason:
 
-- The startup question "Set up Discord now?" was answered Yes, or the session-start hook said Discord is turned on but not installed: run `/discord on`.
+- The startup question "Set up Discord now?" was answered Yes, or the session-start hook said Discord is turned on but not installed, or on but not set up: run `/discord on`.
 - The session-start hook printed a Discord channel and a listener command, or a listener event arrived: follow "In every session with Discord on".
 
 ### /discord on
@@ -61,22 +61,24 @@ The helper follows the plugin's version: the session-start hook starts an update
 
 ## Status codes
 
-| Code | Meaning | What to do |
-| :- | :- | :- |
-| `connected` | Working | Nothing |
-| `off` | Turned off with `/discord off` | `sk-discord on` |
-| `not-installed` | No helper binary | Setup step 1 |
-| `no-token` | No bot token in the Keychain | Setup step 3 |
-| `token-rejected` | Discord refused the token | Setup step 3, with a new token from the portal |
-| `intent-missing` | Message Content Intent is off | Setup step 2, the intent toggle only |
-| `not-in-server` | The bot isn't in the server | Setup steps 4 and 5 |
-| `update-failed` | The last update didn't install | `/discord update`, or setup step 1 |
+| Code | Problem | Fix | Setup step |
+| :- | :- | :- | :- |
+| `connected` | none | nothing to do | none |
+| `connecting` | the helper is between connection attempts | wait a few seconds and run `status` again | none |
+| `off` | Discord is off | `/discord on` | none |
+| `not-installed` | the helper isn't installed | `/discord on` | 1 |
+| `no-token` | there is no bot token in the Keychain | `sk-discord setup token` | 3 |
+| `token-rejected` | Discord rejected the bot token | `sk-discord setup token` | 3, with a new token from the portal |
+| `intent-missing` | the bot isn't allowed to read messages | turn on Message Content Intent for the bot in the developer portal | 2, the intent toggle only |
+| `no-server` | no Discord server is set up | `sk-discord setup server` | 5 |
+| `not-in-server` | the bot isn't in the server | `sk-discord setup invite` | 4 and 5 |
+| `update-failed` | the last update didn't install | `/discord update` | 1, if the update fails again |
 
-If `status` says the helper isn't running, go to setup step 6. When `status` prints its own fix, follow that.
+`sk-discord setup token` is for the user to run in their own terminal (setup step 3); never run it yourself. If `status` says the helper isn't running, go to setup step 6. When `status` prints its own fix, follow that.
 
 ## Guided setup
 
-To set up, or to finish a setup that stopped partway, read `${CLAUDE_SKILL_DIR}/setup.md` with the Read tool and follow it. It has eight steps, run one at a time, waiting for the user after each; "Setup step" in the table above means a step there.
+To set up, or to finish a setup that stopped partway, read `${CLAUDE_SKILL_DIR}/setup.md` with the Read tool and follow it. It has eight steps, run one at a time, waiting for the user after each; the table's "Setup step" column means a step there.
 
 The session never asks for, sees, handles or types the bot token. The user pastes it only into `sk-discord setup token` in their own terminal, never into the chat. If a token shows up in the chat anyway, don't use it or repeat it, and tell the user to reset it in the developer portal.
 
