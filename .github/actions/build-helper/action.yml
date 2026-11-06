@@ -1,0 +1,89 @@
+name: Build the Discord helper
+description: >-
+  Tests and type-checks the helper, builds and signs sk-discord for both Mac
+  architectures, checks the binaries, writes checksums.txt and uploads the
+  three files as the sk-discord artifact. Runs on a macOS runner, after
+  actions/checkout.
+
+inputs:
+  version:
+    description: The version in plugin.json, which the binaries must print for --version
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: 1.4.4
+
+    - name: Install dependencies
+      shell: bash
+      working-directory: helper
+      run: bun install --frozen-lockfile
+
+    - name: Run the helper tests
+      shell: bash
+      working-directory: helper
+      run: bun test
+
+    - name: Type-check
+      shell: bash
+      working-directory: helper
+      run: bunx tsc --noEmit
+
+    # The build script compiles both targets into helper/build and signs
+    # each binary ad hoc, so there's no separate signing step.
+    - name: Build and sign
+      shell: bash
+      working-directory: helper
+      run: bun run build
+
+    # Both binaries get the signature and architecture checks. Only the one
+    # built for this Mac's CPU runs --version: an Intel Mac can't run the
+    # arm64 binary.
+    - name: Check the binaries
+      shell: bash
+      working-directory: helper/build
+      env:
+        VERSION: ${{ inputs.version }}
+      run: |
+        for arch in arm64 x64; do
+          f="sk-discord-darwin-$arch"
+          codesign --verify --strict "$f"
+          want=$arch
+          [ "$arch" = x64 ] && want=x86_64
+          have=$(lipo -archs "$f")
+          if [ "$have" != "$want" ]; then
+            echo "::error::$f is built for $have, not $want"
+            exit 1
+          fi
+        done
+        case $(uname -m) in
+          arm64) native=sk-discord-darwin-arm64 ;;
+          *) native=sk-discord-darwin-x64 ;;
+        esac
+        printed=$("./$native" --version)
+        if [ "$printed" != "$VERSION" ]; then
+          echo "::error::$native --version printed '$printed', not $VERSION"
+          exit 1
+        fi
+
+    - name: Write checksums.txt
+      shell: bash
+      working-directory: helper/build
+      run: |
+        shasum -a 256 sk-discord-darwin-arm64 sk-discord-darwin-x64 > checksums.txt
+        cat checksums.txt
+
+    # The artifact drops the executable bit, which release assets don't carry
+    # anyway. overwrite lets a re-run replace an earlier attempt's artifact.
+    - uses: actions/upload-artifact@v7
+      with:
+        name: sk-discord
+        path: |
+          helper/build/sk-discord-darwin-arm64
+          helper/build/sk-discord-darwin-x64
+          helper/build/checksums.txt
+        if-no-files-found: error
+        overwrite: true

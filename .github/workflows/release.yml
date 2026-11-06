@@ -5,6 +5,14 @@ name: release
 # and checksums.txt. The tag must be v + the version in
 # .claude-plugin/plugin.json, which the helper bundles at build time.
 #
+# Jobs:
+# - check: checks the tag against plugin.json.
+# - build: runs .github/actions/build-helper on an Apple silicon Mac. It tests
+#   the helper, builds, signs and checks both binaries, and uploads them with
+#   checksums.txt as the sk-discord artifact.
+# - publish: downloads the artifact, checks the files against checksums.txt
+#   and creates the release. It's the only job that can write to the repo.
+#
 # Run it by hand (workflow_dispatch) for a dry run: it does everything but
 # create the release. Give it a tag to check that tag against plugin.json.
 
@@ -24,17 +32,21 @@ on:
         required: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: release
-    runs-on: macos-latest
-    timeout-minutes: 30
+  check:
+    name: check the tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      dry_run: ${{ steps.tag.outputs.dry_run }}
     steps:
       - uses: actions/checkout@v7
 
@@ -81,63 +93,50 @@ jobs:
             echo "dry_run=$dry_run"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: oven-sh/setup-bun@v2
+  build:
+    name: build (Apple silicon)
+    needs: check
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/build-helper
         with:
-          bun-version: 1.4.4
+          version: ${{ needs.check.outputs.version }}
 
-      - name: Install dependencies
-        working-directory: helper
-        run: bun install --frozen-lockfile
+  publish:
+    name: publish
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # Only CHANGELOG.md is read from the checkout, so the token isn't kept.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
-      - name: Run the helper tests
-        working-directory: helper
-        run: bun test
+      - uses: actions/download-artifact@v8
+        with:
+          name: sk-discord
+          path: helper/build
 
-      - name: Type-check
-        working-directory: helper
-        run: bunx tsc --noEmit
-
-      # The build script compiles both targets into helper/build and signs
-      # each binary ad hoc, so there's no separate signing step.
-      - name: Build and sign
-        working-directory: helper
-        run: bun run build
-
-      - name: Check the binaries
+      - name: Check the files against checksums.txt
         working-directory: helper/build
-        env:
-          VERSION: ${{ steps.tag.outputs.version }}
         run: |
-          for arch in arm64 x64; do
-            f="sk-discord-darwin-$arch"
-            codesign --verify --strict "$f"
-            want=$arch
-            [ "$arch" = x64 ] && want=x86_64
-            have=$(lipo -archs "$f")
-            if [ "$have" != "$want" ]; then
-              echo "::error::$f is built for $have, not $want"
+          for f in sk-discord-darwin-arm64 sk-discord-darwin-x64; do
+            if ! grep -q "  $f\$" checksums.txt; then
+              echo "::error::checksums.txt has no line for $f"
               exit 1
             fi
           done
-          case $(uname -m) in
-            arm64) native=sk-discord-darwin-arm64 ;;
-            *) native=sk-discord-darwin-x64 ;;
-          esac
-          printed=$("./$native" --version)
-          if [ "$printed" != "$VERSION" ]; then
-            echo "::error::$native --version printed '$printed', not $VERSION"
-            exit 1
-          fi
-
-      - name: Write checksums.txt
-        working-directory: helper/build
-        run: |
-          shasum -a 256 sk-discord-darwin-arm64 sk-discord-darwin-x64 > checksums.txt
-          cat checksums.txt
+          sha256sum -c checksums.txt
 
       - name: Write the release notes
         env:
-          VERSION: ${{ steps.tag.outputs.version }}
+          VERSION: ${{ needs.check.outputs.version }}
         run: |
           awk -v v="$VERSION" '
             /^## / { on = (index($0, "## " v " ") == 1); next }
@@ -150,11 +149,12 @@ jobs:
           cat "$RUNNER_TEMP/notes.md"
 
       - name: Create the release
-        if: steps.tag.outputs.dry_run != 'true'
+        if: needs.check.outputs.dry_run != 'true'
         working-directory: helper/build
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.check.outputs.tag }}
         run: |
           gh release create "$TAG" \
             --verify-tag \
@@ -163,9 +163,9 @@ jobs:
             sk-discord-darwin-arm64 sk-discord-darwin-x64 checksums.txt
 
       - name: Dry run summary
-        if: steps.tag.outputs.dry_run == 'true'
+        if: needs.check.outputs.dry_run == 'true'
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.check.outputs.tag }}
         run: |
           {
             echo "Dry run for $TAG: built, signed and checked; no release created."
