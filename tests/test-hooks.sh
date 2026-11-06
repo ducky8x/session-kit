@@ -58,6 +58,8 @@ subagent_input() { printf '{"session_id":"%s","cwd":"/tmp","hook_event_name":"Su
 has() { case $OUT in *"$1"*) return 0 ;; *) return 1 ;; esac; }
 expect_has() { if has "$2"; then pass "$1"; else fail "$1" "missing: $2"; fi; }
 expect_lacks() { if has "$2"; then fail "$1" "unexpected: $2"; else pass "$1"; fi; }
+# expect_line <name> <text>: one line of the output is exactly <text>
+expect_line() { if printf '%s\n' "$OUT" | grep -q -x -F -e "$2"; then pass "$1"; else fail "$1" "no line: $2"; fi; }
 expect_status0() { if [ "$STATUS" -eq 0 ]; then pass "$1"; else fail "$1" "exit status $STATUS"; fi; }
 expect_under() { # <name> <limit>
   local n
@@ -191,6 +193,78 @@ expect_has "compact without a state file says not to ask again" "$NO_ASK"
 run_hook "$SESSION_START" "$(start_input s-fork fork)"
 expect_lacks "fork doesn't ask for the start skill" "$START_LINE"
 expect_has "fork says not to ask again" "$NO_ASK"
+
+echo "== session-start: cloud agents"
+new_home cloud
+mkdir -p "$(state_dir)"
+RESTORED="Session setup (restored):"
+CLOUD_RULES="Cloud agent rules: the session-kit plugin folder/skills/start/cloud.md (read it before dispatching)."
+# line_of <text>: the number of the first output line that contains <text>
+line_of() { printf '%s\n' "$OUT" | grep -n -F -e "$1" | head -n 1 | cut -d: -f1; }
+
+cat > "$(state_dir)/s-c-unknown.json" <<'JSON'
+{
+  "workflow": "multi",
+  "autonomous": { "on": false },
+  "cloud": { "on": true, "remote": "unknown" },
+  "updatedAt": "2026-11-06T10:00:00Z"
+}
+JSON
+run_hook "$SESSION_START" "$(start_input s-c-unknown compact)"
+expect_status0 "cloud on, remote unknown exits 0"
+expect_line "cloud on, remote unknown restates Cloud agents: ON" "$RESTORED Workflow: multi-agent · Autonomous: OFF · Cloud agents: ON"
+expect_line "cloud on, remote unknown prints the Cloud agent rules line" "$CLOUD_RULES"
+setup_at=$(line_of "$RESTORED"); rules_at=$(line_of "Cloud agent rules:")
+if [ -n "$setup_at" ] && [ -n "$rules_at" ] && [ "$rules_at" -gt "$setup_at" ]; then pass "the Cloud agent rules line follows the restated setup"; else fail "the Cloud agent rules line follows the restated setup" "setup line $setup_at, rules line $rules_at"; fi
+
+echo '{"workflow":"multi","autonomous":{"on":false},"cloud":{"on":true,"remote":"available"},"updatedAt":"x"}' > "$(state_dir)/s-c-avail.json"
+run_hook "$SESSION_START" "$(start_input s-c-avail compact)"
+expect_line "cloud on, remote available restates Cloud agents: ON" "$RESTORED Workflow: multi-agent · Autonomous: OFF · Cloud agents: ON"
+expect_line "cloud on, remote available prints the Cloud agent rules line" "$CLOUD_RULES"
+
+echo '{"workflow":"multi","cloud":{"on":true},"updatedAt":"x"}' > "$(state_dir)/s-c-noremote.json"
+run_hook "$SESSION_START" "$(start_input s-c-noremote compact)"
+expect_line "cloud on with no remote key restates Cloud agents: ON" "$RESTORED Workflow: multi-agent · Autonomous: OFF · Cloud agents: ON"
+
+echo '{"workflow":"multi","autonomous":{"on":false},"cloud":{"on":true,"remote":"unavailable"},"updatedAt":"x"}' > "$(state_dir)/s-c-unavail.json"
+run_hook "$SESSION_START" "$(start_input s-c-unavail compact)"
+expect_line "cloud on, remote unavailable restates running locally" "$RESTORED Workflow: multi-agent · Autonomous: OFF · Cloud agents: ON (running locally: not available)"
+expect_line "cloud on, remote unavailable still prints the Cloud agent rules line" "$CLOUD_RULES"
+
+echo '{"workflow":"multi","autonomous":{"on":false},"cloud":{"on":false},"updatedAt":"x"}' > "$(state_dir)/s-c-off.json"
+run_hook "$SESSION_START" "$(start_input s-c-off compact)"
+expect_line "cloud off restates Cloud agents: OFF" "$RESTORED Workflow: multi-agent · Autonomous: OFF · Cloud agents: OFF"
+expect_lacks "cloud off doesn't print the Cloud agent rules line" "Cloud agent rules:"
+
+echo '{"workflow":"multi","autonomous":{"on":true,"scope":"session"},"updatedAt":"x"}' > "$(state_dir)/s-c-none.json"
+run_hook "$SESSION_START" "$(start_input s-c-none compact)"
+expect_line "no cloud object restates the setup as before" "$RESTORED Workflow: multi-agent · Autonomous: ON (this session)"
+expect_lacks "no cloud object restates no Cloud agents text" "Cloud agents"
+expect_lacks "no cloud object prints no Cloud agent rules line" "Cloud agent rules:"
+
+echo '{"workflow":"single","autonomous":{"on":true,"scope":"session"},"cloud":{"on":false},"updatedAt":"x"}' > "$(state_dir)/s-c-auto-first.json"
+run_hook "$SESSION_START" "$(start_input s-c-auto-first compact)"
+expect_line "autonomous on + cloud off restates Autonomous: ON (this session)" "$RESTORED Workflow: single-agent · Autonomous: ON (this session) · Cloud agents: OFF"
+echo '{"workflow":"single","cloud":{"on":false},"autonomous":{"on":true,"scope":"session"},"updatedAt":"x"}' > "$(state_dir)/s-c-cloud-first.json"
+run_hook "$SESSION_START" "$(start_input s-c-cloud-first compact)"
+expect_line "cloud off + autonomous on (keys swapped) restates Autonomous: ON (this session)" "$RESTORED Workflow: single-agent · Autonomous: ON (this session) · Cloud agents: OFF"
+
+echo '{"workflow":"multi","autonomous":{"on":true,"scope":"session"},"cloud":{"on":false},"updatedAt":"x"}' > "$(state_dir)/s-c-resume-on.json"
+run_hook "$SESSION_START" "$(start_input s-c-resume-on resume)"
+expect_has "resume with autonomous on, cloud off still prints the keep-awake note" "have stopped"
+echo '{"workflow":"multi","autonomous":{"on":false},"cloud":{"on":true,"remote":"unknown"},"updatedAt":"x"}' > "$(state_dir)/s-c-resume-off.json"
+run_hook "$SESSION_START" "$(start_input s-c-resume-off resume)"
+expect_lacks "resume with autonomous off, cloud on doesn't print the keep-awake note" "have stopped"
+
+echo '{"workflow":"single","autonomous":{"on":true,"scope":"task","task":"fix {x} in the parser"},"updatedAt":"x"}' > "$(state_dir)/s-c-braces.json"
+run_hook "$SESSION_START" "$(start_input s-c-braces resume)"
+expect_line "a task with braces in it restates as before" "$RESTORED Workflow: single-agent · Autonomous: ON (until fix {x} in the parser is done)"
+expect_has "resume with a braced task and autonomous on prints the keep-awake note" "have stopped"
+
+TEST_PLUGIN_ROOT="$TMP_ROOT/plugin-root"
+run_hook "$SESSION_START" "$(start_input s-c-unknown compact)"
+expect_line "the Cloud agent rules line uses CLAUDE_PLUGIN_ROOT" "Cloud agent rules: $TMP_ROOT/plugin-root/skills/start/cloud.md (read it before dispatching)."
+TEST_PLUGIN_ROOT=""
 
 echo "== session-start: rules file"
 new_home rules
