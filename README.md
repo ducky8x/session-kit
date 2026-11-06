@@ -1,6 +1,6 @@
 # session-kit
 
-session-kit is a Claude Code plugin that sets up every session the same way. When a session starts, it asks whether one agent should do the work or coordinate worker agents, and whether the session should run autonomously. It also loads your standing rules into every session and subagent, and keeps a short per-project brief that new sessions read first. For a bigger task, it can work out a detailed spec with you and build it once you say go.
+session-kit is a Claude Code plugin that sets up every session the same way. When a session starts, it asks whether one agent should do the work or coordinate worker agents, whether the session should run autonomously, and whether worker agents can run in the cloud. It also loads your standing rules into every session and subagent, and keeps a short per-project brief that new sessions read first. For a bigger task, it can work out a detailed spec with you and build it once you say go.
 
 ## Install
 
