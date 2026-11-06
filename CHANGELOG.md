@@ -3,6 +3,7 @@
 ## Unreleased
 
 - The release build falls back to an Intel Mac runner when no Apple silicon runner is free.
+- Cloud agents: a startup question that sends worker tasks that don't need your computer to cloud subagents, once Claude Code offers them. Until then they run locally.
 
 ## 0.2.0 - 2026-11-05
 

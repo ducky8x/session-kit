@@ -33,12 +33,14 @@ claude --plugin-dir ./session-kit
 ## What happens when a session starts
 
 1. The SessionStart hook gives Claude the session id, the path of the session's state file and your rules file, and asks it to run `/session-kit:start` before anything else.
-2. The start skill asks two questions in one dialog:
+2. The start skill asks up to four questions in one dialog:
    - **Workflow**: Single-agent (one agent does all the work) or Multi-agent (this agent plans, hands tasks to worker agents, reviews their results, and handles the repo and git).
    - **Autonomous**: No (Claude asks when a decision is yours) or Yes (Claude decides, notes each assumption, and keeps going).
+   - **Cloud**: No (worker agents run on your computer) or Yes (in a multi-agent session, worker tasks that don't need your computer run as cloud subagents once Claude Code offers them, and on your computer until then). See [Cloud agents](#cloud-agents).
+   - **Discord**, asked on macOS until you set Discord up or turn it down: Yes (Claude walks you through setting up a private Discord server with a channel for each session) or No (you can turn it on later with `/discord on`). See [Discord](#discord).
 
-   It skips what your first message already answers, and it doesn't ask in subagents or in print mode (`claude -p`). If you set `askUserQuestionTimeout` and nobody answers in time, it picks single-agent with autonomous mode on.
-3. It saves the answers in the session's state file and prints one line, such as `Workflow: multi-agent · Autonomous: ON`.
+   It skips what your first message already answers, and it doesn't ask in subagents or in print mode (`claude -p`). If you set `askUserQuestionTimeout` and nobody answers in time, it picks single-agent, autonomous mode on and cloud agents off, and it asks about Discord again in the next session.
+3. It saves the answers in the session's state file and prints one line, such as `Workflow: multi-agent · Autonomous: ON · Cloud agents: ON`.
 4. If a `.agentcontext` file exists in the current folder or a parent folder, it runs `/session-kit:load-context`. Then it starts on your request.
 
 After a summary of the chat (compaction), a resume or a fork, the hook restates the saved setup instead of asking again. To change the setup mid-session, run `/session-kit:start` or say something like "switch to single-agent".
@@ -47,7 +49,7 @@ After a summary of the chat (compaction), a resume or a fork, the hook restates 
 
 | Command | What it does |
 | :- | :- |
-| `/session-kit:start` | Sets the session's workflow and autonomous mode. Runs by itself at session start; run it again to change the setup. It also creates your rules file from the template when you ask. |
+| `/session-kit:start` | Sets the session's workflow, autonomous mode and [cloud agents](#cloud-agents). Runs by itself at session start; run it again to change the setup. It also creates your rules file from the template when you ask. |
 | `/session-kit:autonomous-mode` | Turns autonomous mode on or off. Followed by a task, it turns it on for that task only. While it's on, Claude decides instead of asking, still stops for irreversible steps, lists the decisions it made, and keeps a Mac awake. |
 | `/session-kit:load-context` | Reads every `.agentcontext` file in the current folder and its parents, plus the README each one points to. |
 | `/session-kit:create-context` | Writes a `.agentcontext` brief for the current project and keeps it out of git. |
@@ -72,6 +74,36 @@ Ask Claude to brainstorm, plan or spec out a task ("let's brainstorm the export 
 The questions and the go-ahead run even when autonomous mode is on. Autonomous mode applies to the work after the go. If a round of questions goes unanswered, Claude takes the defaults, marks them as unanswered in the spec's Decisions log, and finishes the spec, but it still waits for your go before building anything.
 
 Each spec has a status (drafting, awaiting go-ahead, approved, in progress, done). When `/session-kit:load-context` briefs you on a project, it names the specs that aren't done yet.
+
+## Cloud agents
+
+The **Cloud** startup question decides whether worker agents can run in the cloud. It only matters in a multi-agent session: a single-agent session saves the answer but sends nothing to the cloud.
+
+With Cloud on, every worker task that doesn't need your computer goes to a cloud subagent, however long it is. Each dispatch line says where the task went, such as "Dispatched fix/parser-crash (cloud)". A task stays on your computer when it:
+
+1. runs macOS-only tools, such as `xcodebuild`, `codesign`, `osascript` or `defaults`;
+2. builds, launches or tests a macOS or iOS app, or uses the iOS Simulator;
+3. reads or writes anything outside the repo, such as `~/.claude` or `~/Downloads`, or your real data, settings or apps;
+4. can't be pushed, because the repo has no GitHub remote or you said not to push it;
+5. needs the screen, a browser pane, computer use, hardware, or a local server you're watching;
+6. needs secrets kept on your computer, such as the Keychain or a `.env` file that isn't in git;
+7. runs one command longer than about 9 minutes that can't save checkpoints and resume;
+8. would produce a single output file over 2 GB, the GitHub release asset limit.
+
+If Claude isn't sure, the task stays local.
+
+Claude Code doesn't document cloud subagents yet, and until it offers them, a task sent to the cloud runs on your computer. So the first cloud task in each session checks where it ran. If it ran locally, Claude says so once, merges its work as usual, and runs every later task in that session locally. The same happens if a cloud task can't push to the repo. From then on, the setup restated after a summary of the chat or a resume shows `Cloud agents: ON (running locally: not available)`. The next session checks again.
+
+Turning Cloud on lets Claude push to your GitHub repo without asking, in two cases:
+
+- **Task branches.** Each cloud task gets its own branch, made from your local `main`. Claude pushes the branch before dispatching the task, the cloud agent pushes its commits to it, and Claude deletes it from GitHub after the merge. If your `main` has commits you haven't pushed, they go up on the task branch.
+- **Draft releases for files over 50 MB.** A cloud task commits smaller files and uploads bigger ones to a draft GitHub release. Claude downloads them, checks their SHA-256 hashes, and deletes the release once they match.
+
+Cloud mode never pushes `main`, and every other push still waits for your OK.
+
+A cloud machine runs one command for at most 10 minutes, and it pauses after a few minutes without activity. So a command expected to run longer than about 9 minutes goes to the cloud only if it can save checkpoints and resume. The cloud agent then runs it in 9-minute chunks, each starting from the last checkpoint, and commits small outputs such as metrics and logs after each chunk.
+
+To switch mid-session, say "turn cloud agents on" or "turn cloud agents off", or run `/session-kit:start cloud on` or `/session-kit:start cloud off`.
 
 ## Discord
 
@@ -109,7 +141,7 @@ The file is yours. The plugin never overwrites it: the start skill copies the te
 
 ## Where state lives
 
-Each session's setup is saved in `~/.claude/session-kit/state/<session id>.json`: the workflow, whether autonomous mode is on and for what scope, and the ids of its keep-awake command and heartbeat. That file lets the setup survive a summary of the chat. The session-start hook deletes state files older than 30 days.
+Each session's setup is saved in `~/.claude/session-kit/state/<session id>.json`: the workflow, whether autonomous mode is on and for what scope, the ids of its keep-awake command and heartbeat, and the Cloud answer with whether cloud subagents turned out to be available. That file lets the setup survive a summary of the chat. The session-start hook deletes state files older than 30 days.
 
 ## Requirements
 
