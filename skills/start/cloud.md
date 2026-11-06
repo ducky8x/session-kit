@@ -78,12 +78,12 @@ Each cloud task gets its own branch, `<prefix>/<name>` with one of the user's pr
 - **Pushes the cloud agent makes:** `git push origin <branch>` after each commit, and only when `CLOUD_CHECK=true`.
 
 1. **Before dispatch:**
-   - Create the branch from `main` with `git branch <branch> main`. Don't give it a worktree yet. Git won't check out a branch that another worktree holds, so a worktree on it would block the agent's `git checkout -B` in a fallback and your `git branch -f` after a cloud run.
+   - Create the branch from `main` with `git branch <branch> main`. Don't give it a worktree yet. Git won't check out a branch that another worktree holds, so a worktree on it would block the agent's `git checkout <branch>` in a fallback and your `git branch -f` after a cloud run.
    - Scan `git log origin/main..<branch>` and `git diff origin/main...<branch>` for trailers, AI names, `/Users/` paths and the user's real name, and fix anything that turns up.
    - Then push the branch with `git push -u origin <branch>`.
    - If `main` has unpushed commits, they go up on the task branch only.
 2. **The brief tells the agent to** (the cloud brief block covers all three):
-   - start from the task branch: `git fetch origin <branch> && git checkout -B <branch> origin/<branch>`;
+   - start from the task branch: `git fetch origin <branch> && git checkout -B <branch> origin/<branch>` in the cloud, or `git checkout <branch>` on the Mac or when the fetch fails;
    - commit after each step, and push after each commit when in the cloud;
    - never push another branch, never merge, never touch `main`.
 3. **When the report arrives (cloud case):**
@@ -130,8 +130,9 @@ Cloud task rules (mandatory):
 1. Run this as your first command, before anything else:
      printf 'CLOUD_CHECK=%s\n' "${CLAUDE_CODE_REMOTE:-unset}"
    The first line of your final report must be the line it printed, exactly.
-2. Start from the task branch:
+2. Start from the task branch. If CLOUD_CHECK printed true:
      git fetch origin <branch> && git checkout -B <branch> origin/<branch>
+   If it didn't, or the fetch fails, run `git checkout <branch>` instead.
 3. Commit after each step. If CLOUD_CHECK printed true, push after each
    commit with `git push origin <branch>`; otherwise don't push. Never push
    another branch, never merge, never touch main. If a push is refused, stop
