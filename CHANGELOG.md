@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The release build falls back to an Intel Mac runner when no Apple silicon runner is free.
+
 ## 0.2.0 - 2026-11-05
 
 Discord companion: every interactive session can get its own channel in a private Discord server of yours. macOS only.

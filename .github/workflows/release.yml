@@ -5,8 +5,29 @@ name: release
 # and checksums.txt. The tag must be v + the version in
 # .claude-plugin/plugin.json, which the helper bundles at build time.
 #
+# Jobs:
+# - check: checks the tag against plugin.json.
+# - build-apple-silicon: runs .github/actions/build-helper on an Apple silicon
+#   Mac. The action tests the helper, builds, signs and checks both binaries,
+#   and uploads them with checksums.txt as the sk-discord artifact.
+# - build-intel: runs the same action on an Intel Mac when the run asks for
+#   Intel, or when no runner picked up build-apple-silicon. GitHub cancels a
+#   job that waits too long for a runner (about 15 minutes for v0.2.0). Each
+#   build job sets started=true in its first step, so a build that ran and
+#   failed, such as a failing test, never starts the Intel build. The Intel
+#   Mac can't run the arm64 binary, so only the x64 binary runs --version
+#   there.
+# - publish: downloads the artifact, checks the files against checksums.txt
+#   and creates the release. It's the only job that can write to the repo.
+# - no-runner: fails the run and says how to retry when no Mac runner picked
+#   up the build.
+#
 # Run it by hand (workflow_dispatch) for a dry run: it does everything but
 # create the release. Give it a tag to check that tag against plugin.json.
+# The runner input picks the Mac. auto, the default and what a tag push uses,
+# tries Apple silicon first, then Intel. apple-silicon never falls back to
+# Intel. intel skips the Apple silicon job, to test the Intel build or to skip
+# the wait when Apple silicon runners are busy.
 
 on:
   push:
@@ -22,19 +43,32 @@ on:
         description: Tag to check against plugin.json (default, the tag the run started from, else v + plugin.json's version)
         type: string
         required: false
+      runner:
+        description: Which Mac builds the helper (auto tries Apple silicon, then Intel if no Apple silicon runner picks up the job)
+        type: choice
+        options:
+          - auto
+          - apple-silicon
+          - intel
+        default: auto
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: release
-    runs-on: macos-latest
-    timeout-minutes: 30
+  check:
+    name: check the tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      dry_run: ${{ steps.tag.outputs.dry_run }}
+      runner: ${{ steps.tag.outputs.runner }}
     steps:
       - uses: actions/checkout@v7
 
@@ -46,6 +80,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
           INPUT_TAG: ${{ inputs.tag }}
+          INPUT_RUNNER: ${{ inputs.runner }}
         run: |
           version=$(sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' .claude-plugin/plugin.json | head -n 1)
           if [ -z "$version" ]; then
@@ -55,8 +90,17 @@ jobs:
           if [ "$EVENT" = push ]; then
             tag=$REF_NAME
             dry_run=false
+            runner=auto
           else
             dry_run=$INPUT_DRY_RUN
+            runner=${INPUT_RUNNER:-auto}
+            case $runner in
+              auto | apple-silicon | intel) ;;
+              *)
+                echo "::error::Unknown runner $runner (pick auto, apple-silicon or intel)"
+                exit 1
+                ;;
+            esac
             if [ -n "$INPUT_TAG" ]; then
               tag=$INPUT_TAG
             elif [ "$REF_TYPE" = tag ]; then
@@ -74,70 +118,108 @@ jobs:
             echo "::error::Tag $tag doesn't match plugin.json's version $version (the tag should be v$version)"
             exit 1
           fi
-          echo "Tag $tag matches plugin.json's version $version (dry run: $dry_run)"
+          echo "Tag $tag matches plugin.json's version $version (dry run: $dry_run, runner: $runner)"
           {
             echo "tag=$tag"
             echo "version=$version"
             echo "dry_run=$dry_run"
+            echo "runner=$runner"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: oven-sh/setup-bun@v2
+  build-apple-silicon:
+    name: build (Apple silicon)
+    needs: check
+    if: needs.check.outputs.runner != 'intel'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    outputs:
+      started: ${{ steps.started.outputs.started }}
+    steps:
+      # Job outputs survive a failed job, so started=true marks a build that
+      # got a runner. It stays empty when no runner ever picked the job up.
+      - name: Mark the build as started
+        id: started
+        run: echo "started=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/build-helper
         with:
-          bun-version: 1.4.4
+          version: ${{ needs.check.outputs.version }}
 
-      - name: Install dependencies
-        working-directory: helper
-        run: bun install --frozen-lockfile
+  build-intel:
+    name: build (Intel)
+    needs: [check, build-apple-silicon]
+    # GitHub reports a job no runner picked up as cancelled; failure is
+    # accepted too in case that changes. !cancelled() keeps this job from
+    # starting after someone cancels the run.
+    if: >-
+      !cancelled()
+      && needs.check.result == 'success'
+      && (needs.check.outputs.runner == 'intel'
+        || (needs.check.outputs.runner == 'auto'
+          && (needs.build-apple-silicon.result == 'cancelled' || needs.build-apple-silicon.result == 'failure')
+          && needs.build-apple-silicon.outputs.started != 'true'))
+    runs-on: macos-26-intel
+    timeout-minutes: 30
+    outputs:
+      started: ${{ steps.started.outputs.started }}
+    steps:
+      - name: Mark the build as started
+        id: started
+        run: echo "started=true" >> "$GITHUB_OUTPUT"
 
-      - name: Run the helper tests
-        working-directory: helper
-        run: bun test
-
-      - name: Type-check
-        working-directory: helper
-        run: bunx tsc --noEmit
-
-      # The build script compiles both targets into helper/build and signs
-      # each binary ad hoc, so there's no separate signing step.
-      - name: Build and sign
-        working-directory: helper
-        run: bun run build
-
-      - name: Check the binaries
-        working-directory: helper/build
+      - name: Say why the build runs on Intel
         env:
-          VERSION: ${{ steps.tag.outputs.version }}
+          RUNNER: ${{ needs.check.outputs.runner }}
         run: |
-          for arch in arm64 x64; do
-            f="sk-discord-darwin-$arch"
-            codesign --verify --strict "$f"
-            want=$arch
-            [ "$arch" = x64 ] && want=x86_64
-            have=$(lipo -archs "$f")
-            if [ "$have" != "$want" ]; then
-              echo "::error::$f is built for $have, not $want"
+          if [ "$RUNNER" = intel ]; then
+            echo "::notice::The run asked for an Intel Mac"
+          else
+            echo "::notice::No Apple silicon runner picked up the build, so it runs on an Intel Mac"
+          fi
+
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/build-helper
+        with:
+          version: ${{ needs.check.outputs.version }}
+
+  publish:
+    name: publish
+    needs: [check, build-apple-silicon, build-intel]
+    if: >-
+      !cancelled()
+      && (needs.build-apple-silicon.result == 'success' || needs.build-intel.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      # Only CHANGELOG.md is read from the checkout, so the token isn't kept.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: sk-discord
+          path: helper/build
+
+      - name: Check the files against checksums.txt
+        working-directory: helper/build
+        run: |
+          for f in sk-discord-darwin-arm64 sk-discord-darwin-x64; do
+            if ! grep -q "  $f\$" checksums.txt; then
+              echo "::error::checksums.txt has no line for $f"
               exit 1
             fi
           done
-          case $(uname -m) in
-            arm64) native=sk-discord-darwin-arm64 ;;
-            *) native=sk-discord-darwin-x64 ;;
-          esac
-          printed=$("./$native" --version)
-          if [ "$printed" != "$VERSION" ]; then
-            echo "::error::$native --version printed '$printed', not $VERSION"
-            exit 1
-          fi
-
-      - name: Write checksums.txt
-        working-directory: helper/build
-        run: |
-          shasum -a 256 sk-discord-darwin-arm64 sk-discord-darwin-x64 > checksums.txt
-          cat checksums.txt
+          sha256sum -c checksums.txt
 
       - name: Write the release notes
         env:
-          VERSION: ${{ steps.tag.outputs.version }}
+          VERSION: ${{ needs.check.outputs.version }}
         run: |
           awk -v v="$VERSION" '
             /^## / { on = (index($0, "## " v " ") == 1); next }
@@ -150,11 +232,12 @@ jobs:
           cat "$RUNNER_TEMP/notes.md"
 
       - name: Create the release
-        if: steps.tag.outputs.dry_run != 'true'
+        if: needs.check.outputs.dry_run != 'true'
         working-directory: helper/build
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.check.outputs.tag }}
         run: |
           gh release create "$TAG" \
             --verify-tag \
@@ -163,14 +246,49 @@ jobs:
             sk-discord-darwin-arm64 sk-discord-darwin-x64 checksums.txt
 
       - name: Dry run summary
-        if: steps.tag.outputs.dry_run == 'true'
+        if: needs.check.outputs.dry_run == 'true'
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.check.outputs.tag }}
+          MAC: ${{ needs.build-apple-silicon.result == 'success' && 'an Apple silicon Mac' || 'an Intel Mac' }}
         run: |
           {
-            echo "Dry run for $TAG: built, signed and checked; no release created."
+            echo "Dry run for $TAG: built on $MAC, signed and checked; no release created."
             echo
             echo '```'
             cat helper/build/checksums.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  no-runner:
+    name: no Mac runner
+    needs: [check, build-apple-silicon, build-intel]
+    if: >-
+      !cancelled()
+      && needs.check.result == 'success'
+      && needs.build-apple-silicon.result != 'success'
+      && needs.build-intel.result != 'success'
+      && needs.build-apple-silicon.outputs.started != 'true'
+      && needs.build-intel.outputs.started != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Say how to retry
+        env:
+          RUNNER: ${{ needs.check.outputs.runner }}
+          TAG: ${{ needs.check.outputs.tag }}
+          DRY_RUN: ${{ needs.check.outputs.dry_run }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          retry="gh workflow run release.yml --ref $REF_NAME -f tag=$TAG -f dry_run=$DRY_RUN"
+          case $RUNNER in
+            apple-silicon)
+              echo "::error::No Apple silicon runner picked up the build, so nothing was published. Re-run all jobs once runners are free, or build on Intel: $retry -f runner=intel"
+              ;;
+            intel)
+              echo "::error::No Intel runner picked up the build, so nothing was published. Re-run all jobs once runners are free, or build on Apple silicon: $retry -f runner=apple-silicon"
+              ;;
+            *)
+              echo "::error::Neither an Apple silicon nor an Intel runner picked up the build, so nothing was published. Re-run all jobs once runners are free, or start a new run that skips the wait for Apple silicon: $retry -f runner=intel"
+              ;;
+          esac
+          exit 1
