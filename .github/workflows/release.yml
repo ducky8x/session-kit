@@ -7,11 +7,19 @@ name: release
 #
 # Jobs:
 # - check: checks the tag against plugin.json.
-# - build: runs .github/actions/build-helper on an Apple silicon Mac. It tests
-#   the helper, builds, signs and checks both binaries, and uploads them with
-#   checksums.txt as the sk-discord artifact.
+# - build-apple-silicon: runs .github/actions/build-helper on an Apple silicon
+#   Mac. The action tests the helper, builds, signs and checks both binaries,
+#   and uploads them with checksums.txt as the sk-discord artifact.
+# - build-intel: runs the same action on an Intel Mac when no runner picked up
+#   build-apple-silicon. GitHub cancels a job that waits too long for a runner
+#   (about 15 minutes for v0.2.0). Each build job sets started=true in its
+#   first step, so a build that ran and failed, such as a failing test, never
+#   starts the Intel build. The Intel Mac can't run the arm64 binary, so only
+#   the x64 binary runs --version there.
 # - publish: downloads the artifact, checks the files against checksums.txt
 #   and creates the release. It's the only job that can write to the repo.
+# - no-runner: fails the run and says how to retry when no Mac runner picked
+#   up the build.
 #
 # Run it by hand (workflow_dispatch) for a dry run: it does everything but
 # create the release. Give it a tag to check that tag against plugin.json.
@@ -93,12 +101,49 @@ jobs:
             echo "dry_run=$dry_run"
           } >> "$GITHUB_OUTPUT"
 
-  build:
+  build-apple-silicon:
     name: build (Apple silicon)
     needs: check
     runs-on: macos-latest
     timeout-minutes: 30
+    outputs:
+      started: ${{ steps.started.outputs.started }}
     steps:
+      # Job outputs survive a failed job, so started=true marks a build that
+      # got a runner. It stays empty when no runner ever picked the job up.
+      - name: Mark the build as started
+        id: started
+        run: echo "started=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/build-helper
+        with:
+          version: ${{ needs.check.outputs.version }}
+
+  build-intel:
+    name: build (Intel)
+    needs: [check, build-apple-silicon]
+    # GitHub reports a job no runner picked up as cancelled; failure is
+    # accepted too in case that changes. !cancelled() keeps this job from
+    # starting after someone cancels the run.
+    if: >-
+      !cancelled()
+      && needs.check.result == 'success'
+      && (needs.build-apple-silicon.result == 'cancelled' || needs.build-apple-silicon.result == 'failure')
+      && needs.build-apple-silicon.outputs.started != 'true'
+    runs-on: macos-26-intel
+    timeout-minutes: 30
+    outputs:
+      started: ${{ steps.started.outputs.started }}
+    steps:
+      - name: Mark the build as started
+        id: started
+        run: echo "started=true" >> "$GITHUB_OUTPUT"
+
+      - name: Say why the build runs on Intel
+        run: echo "::notice::No Apple silicon runner picked up the build, so it runs on an Intel Mac"
+
       - uses: actions/checkout@v7
 
       - uses: ./.github/actions/build-helper
@@ -107,7 +152,10 @@ jobs:
 
   publish:
     name: publish
-    needs: [check, build]
+    needs: [check, build-apple-silicon, build-intel]
+    if: >-
+      !cancelled()
+      && (needs.build-apple-silicon.result == 'success' || needs.build-intel.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -166,11 +214,30 @@ jobs:
         if: needs.check.outputs.dry_run == 'true'
         env:
           TAG: ${{ needs.check.outputs.tag }}
+          MAC: ${{ needs.build-apple-silicon.result == 'success' && 'an Apple silicon Mac' || 'an Intel Mac' }}
         run: |
           {
-            echo "Dry run for $TAG: built, signed and checked; no release created."
+            echo "Dry run for $TAG: built on $MAC, signed and checked; no release created."
             echo
             echo '```'
             cat helper/build/checksums.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  no-runner:
+    name: no Mac runner
+    needs: [check, build-apple-silicon, build-intel]
+    if: >-
+      !cancelled()
+      && needs.check.result == 'success'
+      && needs.build-apple-silicon.result != 'success'
+      && needs.build-intel.result != 'success'
+      && needs.build-apple-silicon.outputs.started != 'true'
+      && needs.build-intel.outputs.started != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Say how to retry
+        run: |
+          echo "::error::Neither an Apple silicon nor an Intel Mac runner picked up the build, so nothing was published. Re-run all jobs once Mac runners are free."
+          exit 1
