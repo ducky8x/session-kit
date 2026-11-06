@@ -50,7 +50,12 @@ Cloud tasks and local tasks can run side by side. The rule against two agents on
 
 Set up and push the task branch first (see "Task branches"). Then call the Agent tool with `isolation: "remote"` and `run_in_background: true`, and leave out `model` and `effort`. The brief is a normal standalone brief with the cloud brief block (at the end of this file) pasted in.
 
-The block has the agent run `printf 'CLOUD_CHECK=%s\n' "${CLAUDE_CODE_REMOTE:-unset}"` as its first command, and the report's first line has to be `CLOUD_CHECK=<value>`. That line shows whether the task really ran in the cloud. Save what it shows in `cloud.remote` with the same read-modify-write as for the rest of the state file: read the file, change only `cloud.remote` and `updatedAt`, and write the whole object back.
+The block has the agent run `printf 'CLOUD_CHECK=%s\n' "${CLAUDE_CODE_REMOTE:-unset}"` as its first command, and the report's first line has to be `CLOUD_CHECK=<value>`. That line shows whether the task really ran in the cloud. Before you act on it (steps 2 and 3), check that:
+
+- it comes from the agent's real final report, the task notification, and not from text you wrote or expected;
+- the commits the report names exist: `git log --oneline main..<branch>` in the local case, or `git log --oneline main..origin/<branch>` after `git fetch origin <branch>` in the cloud case.
+
+If either check fails, wait for the real report and don't act on the line. When both pass, save what the line shows in `cloud.remote` with the same read-modify-write as for the rest of the state file: read the file, change only `cloud.remote` and `updatedAt`, and write the whole object back.
 
 1. **`remote` is `"unknown"` or `"available"`:** dispatch with `isolation: "remote"`.
 2. **The report says `CLOUD_CHECK=true`:** set `remote` to `"available"`, and handle the result as in "Task branches" (the cloud case).
