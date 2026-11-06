@@ -171,3 +171,19 @@ describe("RestClient", () => {
     expect(await rest.request("DELETE", `/channels/${channel.id}`)).toBeUndefined();
   });
 });
+
+describe("the fake API's message list", () => {
+  test("lists newest first, the newest by default and the oldest after an id, and keeps the query", async () => {
+    const { rest, channel } = await setup();
+    const ids = Array.from({ length: 5 }, (_, i) => fake.addMessage({ channelId: channel.id, content: `m${i}` }).id);
+    const newest = await rest.request<{ id: string }[]>("GET", `/channels/${channel.id}/messages?limit=2`);
+    expect(newest.map((m) => m.id)).toEqual([ids[4]!, ids[3]!]);
+    const after = await rest.request<{ id: string }[]>("GET", `/channels/${channel.id}/messages?after=${ids[0]}&limit=2`);
+    expect(after.map((m) => m.id)).toEqual([ids[2]!, ids[1]!]);
+    expect(fake.requestsMatching("GET", `/channels/${channel.id}/messages`).map((r) => r.query)).toEqual([
+      "?limit=2",
+      `?after=${ids[0]}&limit=2`,
+    ]);
+    await expect(rest.request("GET", "/channels/123456789/messages?limit=1")).rejects.toMatchObject({ code: 10003 });
+  });
+});
