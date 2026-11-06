@@ -163,7 +163,7 @@ export interface ChannelDeps {
   paths: Paths;
   clock: Clock;
   log: Logger;
-  /** The gateway is connected, so Discord is reachable. */
+  /** Discord is reachable: the gateway is connected, or the helper checks on a timer (battery power). */
   isOnline(): boolean;
   timing?: Timing;
   /**
@@ -171,6 +171,8 @@ export interface ChannelDeps {
    * or handed on to the session that continued its chat (`moved`).
    */
   onUnlinked?(sessionId: string, why: UnlinkReason): void;
+  /** A channel was made for a session. */
+  onChannelMade?(channelId: string): void;
 }
 
 function asChannel(raw: unknown): GuildChannel | null {
@@ -354,6 +356,11 @@ export class ChannelManager {
       this.d.log.warn(`could not read the server's channels: ${(error as Error).message}`);
       return;
     }
+    await this.makeWaitingChannels();
+  }
+
+  /** Make the channels of sessions whose chat started while Discord couldn't be reached. */
+  async makeWaitingChannels(): Promise<void> {
     const waiting = this.d.sessions.all().filter((e) => e.wantsChannel);
     await Promise.allSettled(waiting.map((e) => this.ensureChannel(e.sessionId)));
   }
@@ -671,6 +678,7 @@ export class ChannelManager {
       e.lastMessageAt = this.d.clock.now();
     });
     this.d.log.info(`made channel ${made.id} for session ${entry.sessionId.slice(0, 8)}`);
+    this.d.onChannelMade?.(made.id);
     return made.id;
   }
 

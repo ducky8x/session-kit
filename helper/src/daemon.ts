@@ -1,19 +1,22 @@
 import {
   ChannelManager,
   type ChannelMessage,
+  MINUTE_MS,
   type Timing,
   type UnlinkReason,
   surfaceFor,
   timingFromEnv,
 } from "./channels.ts";
 import type { Clock } from "./clock.ts";
-import { type Config, loadConfig } from "./config.ts";
+import { type Config, batteryPollMinutes, loadConfig } from "./config.ts";
 import { GatewayClient, type GatewayState } from "./discord/gateway.ts";
-import { RestClient } from "./discord/rest.ts";
+import { MISSING_ACCESS, RestClient, RestError, UNKNOWN_GUILD } from "./discord/rest.ts";
 import type { Logger } from "./log.ts";
 import { NamePoller } from "./names.ts";
 import { Outbox, buildPosts } from "./outbound.ts";
 import type { Paths } from "./paths.ts";
+import { CursorStore, MessagePoller } from "./poller.ts";
+import { PowerMonitor } from "./power.ts";
 import type { ProcessRunner } from "./process.ts";
 import type { Keychain } from "./secrets.ts";
 import { ControlServer, HandlerRegistry, type Request, RequestError } from "./server.ts";
@@ -90,10 +93,14 @@ function positiveInteger(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
+/** How many handled message ids are kept, to recognize a message the gateway and a check both bring. */
+const HANDLED_LIMIT = 1000;
+
 /**
  * `sk-discord daemon`: holds the gateway connection, the session registry and the outbox, serves the control
  * socket and runs the timers. With Discord off it still serves the socket (for `status` and turning it on)
- * but does not connect.
+ * but does not connect. On battery power it keeps no gateway connection and checks for new messages every few
+ * minutes instead (`MessagePoller`); posts still go out at once.
  *
  * Commands added later plug in through `handlers` (socket ops), `onInbound` (messages from Discord),
  * `onSend` (posts from sessions), `onPosted` (posts that reached Discord) and `onGatewayEvent` (any other
@@ -108,10 +115,17 @@ export class Daemon {
   readonly channels: ChannelManager;
   readonly names: NamePoller;
   readonly server: ControlServer;
+  readonly cursors: CursorStore;
+  readonly poller: MessagePoller;
+  readonly power: PowerMonitor;
   private config: Config;
   private token: string | null = null;
   private notInServer = false;
   private botId: string | null = null;
+  /** Why Discord can't be reached until the next reload: the token was refused, or the bot may not read messages. */
+  private problem: "token-rejected" | "intent-missing" | null = null;
+  /** Messages already handed on, oldest first. */
+  private readonly handled = new Set<string>();
   private readonly noticeShown = new Set<string>();
   private readonly inboundHandlers: InboundHandler[] = [];
   private readonly sendListeners: ((event: SendEvent) => void)[] = [];
@@ -127,6 +141,7 @@ export class Daemon {
     const { paths, clock, log } = d;
     this.config = loadConfig(paths);
     this.sessions = new SessionStore(paths);
+    this.cursors = new CursorStore(paths);
     this.rest = new RestClient({
       token: () => this.token,
       clock,
@@ -150,8 +165,10 @@ export class Daemon {
       paths,
       clock,
       log,
-      isOnline: () => this.gateway.state === "connected",
+      isOnline: () => this.online(),
       timing: d.timing ?? timingFromEnv(d.env),
+      // A new channel is read from its start: any message in it is newer than the channel itself.
+      onChannelMade: (channelId) => this.cursors.advance(channelId, channelId),
       onUnlinked: (sessionId, why) => {
         for (const listener of this.unlinkedListeners) {
           try {
@@ -199,6 +216,21 @@ export class Daemon {
       claudePath: () => this.config.claudePath ?? "claude",
       onNames: (names) => this.channels.applyNames(names),
     });
+    this.poller = new MessagePoller({
+      rest: this.rest,
+      clock,
+      log,
+      cursors: this.cursors,
+      prepare: () => this.prepareCheck(),
+      // Discord leaves the server out of the messages it lists; the gateway's copy has it.
+      deliver: (message) => this.onMessageCreate({ ...message, guild_id: this.config.guildId }),
+      onUnknownChannel: (channelId) => this.channels.onChannelEvent("CHANNEL_DELETE", { id: channelId }),
+      onRejected: () => {
+        this.problem = "token-rejected";
+        this.outbox.setOnline(this.online());
+      },
+    });
+    this.power = new PowerMonitor({ runner: d.runner, clock, log, onChange: () => this.onPowerChange() });
     this.server = new ControlServer(paths.socket, this.handlers, log);
     this.addCoreHandlers();
     for (const install of d.extensions ?? []) install(this);
@@ -269,7 +301,7 @@ export class Daemon {
     this.server.close();
     this.outbox.close();
     // Give work in flight a moment to finish, but never hang a shutdown on Discord.
-    await Promise.race([Promise.allSettled([...this.background]), Bun.sleep(2000)]);
+    await Promise.race([Promise.allSettled([...this.background, this.poller.settle()]), Bun.sleep(2000)]);
   }
 
   private track(promise: Promise<unknown>): void {
@@ -281,6 +313,7 @@ export class Daemon {
   /** Let tests wait for work the daemon started in the background. */
   async settle(): Promise<void> {
     for (;;) {
+      await this.poller.settle();
       await this.inboundChain;
       await this.channels.settle();
       await this.outbox.idle();
@@ -290,6 +323,8 @@ export class Daemon {
   }
 
   private goQuiet(): void {
+    this.power.stop();
+    this.poller.stop();
     this.gateway.stop();
     this.names.stop();
     this.channels.stop();
@@ -309,6 +344,8 @@ export class Daemon {
     }
     if (!this.config.enabled) {
       this.goQuiet();
+      // Nothing is read while Discord is off. Once it's back on, checks start from the newest messages.
+      this.cursors.clear();
       return;
     }
     const previousToken = this.token;
@@ -326,22 +363,58 @@ export class Daemon {
     logger.addSecret?.(this.token);
     this.names.start();
     this.channels.startSweeper();
-    const state = this.gateway.state;
-    if (this.token !== previousToken || (state !== "connected" && state !== "connecting")) {
-      this.gateway.stop();
-      this.gateway.start();
+    await this.power.start();
+    if (!this.config.enabled || this.token === null) return; // turned off while the power was read
+    // A reload tries again after Discord refused the token or the bot wasn't allowed to read messages.
+    this.problem = null;
+    this.connect(this.token !== previousToken);
+  }
+
+  /** Discord is reachable: the gateway is connected, or the helper checks on a timer on battery power. */
+  private online(): boolean {
+    return this.gateway.state === "connected" || this.poller.running;
+  }
+
+  /**
+   * Connect the way the power source calls for: the gateway on AC power, a check every few minutes on battery.
+   * `restart` starts over even when already connected (the token changed).
+   */
+  private connect(restart: boolean): void {
+    if (this.power.onBattery) {
+      const everyMs = batteryPollMinutes(this.config) * MINUTE_MS;
+      if (restart || this.poller.intervalMs !== everyMs) {
+        if (this.gateway.state !== "idle" && this.gateway.state !== "stopped") this.gateway.stop();
+        this.poller.start(everyMs);
+      }
+    } else {
+      const wasChecking = this.poller.running;
+      const since = this.cursors.snapshot();
+      this.poller.stop();
+      const state = this.gateway.state;
+      if (restart || (state !== "connected" && state !== "connecting")) {
+        this.gateway.stop();
+        this.gateway.start();
+      }
+      // The gateway brings only messages sent from now on: read what came in since the last check.
+      if (wasChecking) void this.poller.check(since);
     }
+    this.outbox.setOnline(this.online());
+  }
+
+  /** The Mac moved between AC and battery power. */
+  private onPowerChange(): void {
+    if (!this.config.enabled || this.token === null || this.problem !== null) return;
+    this.connect(false);
   }
 
   statusCode(): StatusCode {
     if (!this.config.enabled) return "off";
     if (this.token === null) return "no-token";
-    if (this.gateway.state === "token-rejected") return "token-rejected";
-    if (this.gateway.state === "intent-missing") return "intent-missing";
+    if (this.problem !== null) return this.problem;
     if (this.config.guildId === null) return "no-server";
     if (this.notInServer) return "not-in-server";
     if (readUpdateFailure(this.deps.paths) !== null) return "update-failed";
-    return this.gateway.state === "connected" ? "connected" : "connecting";
+    return this.online() ? "connected" : "connecting";
   }
 
   statusReport(): Record<string, unknown> {
@@ -363,7 +436,8 @@ export class Daemon {
 
   private onGatewayState(state: GatewayState): void {
     this.deps.log.info(`gateway ${state}`);
-    this.outbox.setOnline(state === "connected");
+    if (state === "token-rejected" || state === "intent-missing") this.problem = state;
+    this.outbox.setOnline(this.online());
   }
 
   private handleDispatch(type: string, data: any): void {
@@ -382,6 +456,9 @@ export class Daemon {
           this.notInServer = !data.guilds.some((g: { id?: unknown }) => g?.id === guildId);
           if (this.notInServer) this.deps.log.warn("the bot is not in the configured server");
         }
+        // A new gateway session may have missed messages. Rather than hand those on late, at the next check on
+        // battery power, the checks start again from the newest messages.
+        this.cursors.clear();
         this.track(this.channels.onConnected());
         return;
       }
@@ -399,15 +476,66 @@ export class Daemon {
       case "CHANNEL_DELETE":
         this.channels.onChannelEvent(type, data);
         return;
-      case "MESSAGE_CREATE": {
-        if (!data || data.guild_id !== guildId || typeof data.channel_id !== "string") return;
-        const message = data as DiscordMessage;
-        this.inboundChain = this.inboundChain
-          .then(() => this.onMessage(message))
-          .catch((error) => this.deps.log.warn(`handling a message failed: ${(error as Error).message}`));
+      case "MESSAGE_CREATE":
+        this.onMessageCreate(data);
         return;
-      }
     }
+  }
+
+  /**
+   * A message in some channel, from the gateway or from a check on battery power. Each message is handed on
+   * once, however many times it comes, and moves the cursor of a channel the helper reads.
+   */
+  private onMessageCreate(data: any): void {
+    if (!data || data.guild_id !== this.config.guildId || typeof data.channel_id !== "string") return;
+    const message = data as DiscordMessage;
+    if (typeof message.id === "string") {
+      if (this.handled.has(message.id)) return;
+      this.handled.add(message.id);
+      if (this.handled.size > HANDLED_LIMIT) this.handled.delete(this.handled.values().next().value!);
+      if (this.reads(message.channel_id)) this.cursors.advance(message.channel_id, message.id);
+    }
+    this.inboundChain = this.inboundChain
+      .then(() => this.onMessage(message))
+      .catch((error) => this.deps.log.warn(`handling a message failed: ${(error as Error).message}`));
+  }
+
+  /** A session's channel or `#session-kit`. */
+  private reads(channelId: string): boolean {
+    return channelId === this.config.controlChannelId || this.sessions.byChannel(channelId) !== undefined;
+  }
+
+  /**
+   * Before each check on battery power: learn the bot's id, read the server's channels (no gateway events say
+   * what changed), make the channels that were waiting, and list the channels to read: every linked session
+   * channel that isn't archived, and `#session-kit`.
+   */
+  private async prepareCheck(): Promise<string[]> {
+    if (this.config.guildId === null) return [];
+    if (this.botId === null) {
+      const me = await this.rest.request<{ id?: unknown } | undefined>("GET", "/users/@me");
+      if (typeof me?.id === "string") this.botId = me.id;
+    }
+    try {
+      await this.channels.reconcile();
+    } catch (error) {
+      if (error instanceof RestError && (error.code === MISSING_ACCESS || error.code === UNKNOWN_GUILD)) {
+        if (!this.notInServer) this.deps.log.warn("the bot is not in the configured server");
+        this.notInServer = true;
+        return [];
+      }
+      throw error;
+    }
+    this.notInServer = false;
+    await this.channels.makeWaitingChannels();
+    const linked = this.sessions.all().filter((e) => e.channelId !== null);
+    const control = this.config.controlChannelId;
+    const known = new Set(linked.map((e) => e.channelId!));
+    if (control !== null) known.add(control);
+    this.cursors.retain(known);
+    const read = new Set(linked.filter((e) => !e.archived).map((e) => e.channelId!));
+    if (control !== null) read.add(control);
+    return [...read];
   }
 
   private async onMessage(message: DiscordMessage): Promise<void> {
@@ -493,7 +621,7 @@ export class Daemon {
         this.deps.log.warn(`a send listener failed: ${(error as Error).message}`);
       }
     }
-    return { queued: pieces, online: this.gateway.state === "connected" };
+    return { queued: pieces, online: this.online() };
   }
 }
 

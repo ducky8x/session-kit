@@ -131,9 +131,16 @@ export class FakeDiscordRest {
   }
 
   /** A message someone typed in a channel: the owner's, unless `author` says otherwise. */
-  addMessage(o: { channelId: string; content: string; author?: { id: string; bot?: boolean }; type?: number; attachments?: unknown[] }): FakeMessage {
+  addMessage(o: {
+    channelId: string;
+    content: string;
+    author?: { id: string; bot?: boolean };
+    type?: number;
+    attachments?: unknown[];
+    id?: string;
+  }): FakeMessage {
     const message: FakeMessage = {
-      id: this.newId(),
+      id: o.id ?? this.newId(),
       channel_id: o.channelId,
       content: o.content,
       author: { id: o.author?.id ?? OWNER_ID, bot: o.author?.bot ?? false },

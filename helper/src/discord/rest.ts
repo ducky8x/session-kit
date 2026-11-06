@@ -37,6 +37,10 @@ export class RestError extends Error {
 
 /** Discord's error code for a channel that does not exist (deleted). */
 export const UNKNOWN_CHANNEL = 10003;
+/** Discord's error code for a server that does not exist, or that the bot can't see. */
+export const UNKNOWN_GUILD = 10004;
+/** Discord's error code for a resource the bot has no access to, such as a server it isn't in. */
+export const MISSING_ACCESS = 50001;
 
 export interface RestClientOptions {
   baseUrl?: string;
