@@ -10,12 +10,13 @@ name: release
 # - build-apple-silicon: runs .github/actions/build-helper on an Apple silicon
 #   Mac. The action tests the helper, builds, signs and checks both binaries,
 #   and uploads them with checksums.txt as the sk-discord artifact.
-# - build-intel: runs the same action on an Intel Mac when no runner picked up
-#   build-apple-silicon. GitHub cancels a job that waits too long for a runner
-#   (about 15 minutes for v0.2.0). Each build job sets started=true in its
-#   first step, so a build that ran and failed, such as a failing test, never
-#   starts the Intel build. The Intel Mac can't run the arm64 binary, so only
-#   the x64 binary runs --version there.
+# - build-intel: runs the same action on an Intel Mac when the run asks for
+#   Intel, or when no runner picked up build-apple-silicon. GitHub cancels a
+#   job that waits too long for a runner (about 15 minutes for v0.2.0). Each
+#   build job sets started=true in its first step, so a build that ran and
+#   failed, such as a failing test, never starts the Intel build. The Intel
+#   Mac can't run the arm64 binary, so only the x64 binary runs --version
+#   there.
 # - publish: downloads the artifact, checks the files against checksums.txt
 #   and creates the release. It's the only job that can write to the repo.
 # - no-runner: fails the run and says how to retry when no Mac runner picked
@@ -23,6 +24,10 @@ name: release
 #
 # Run it by hand (workflow_dispatch) for a dry run: it does everything but
 # create the release. Give it a tag to check that tag against plugin.json.
+# The runner input picks the Mac. auto, the default and what a tag push uses,
+# tries Apple silicon first, then Intel. apple-silicon never falls back to
+# Intel. intel skips the Apple silicon job, to test the Intel build or to skip
+# the wait when Apple silicon runners are busy.
 
 on:
   push:
@@ -38,6 +43,14 @@ on:
         description: Tag to check against plugin.json (default, the tag the run started from, else v + plugin.json's version)
         type: string
         required: false
+      runner:
+        description: Which Mac builds the helper (auto tries Apple silicon, then Intel if no Apple silicon runner picks up the job)
+        type: choice
+        options:
+          - auto
+          - apple-silicon
+          - intel
+        default: auto
 
 permissions:
   contents: read
@@ -55,6 +68,7 @@ jobs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
       dry_run: ${{ steps.tag.outputs.dry_run }}
+      runner: ${{ steps.tag.outputs.runner }}
     steps:
       - uses: actions/checkout@v7
 
@@ -66,6 +80,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
           INPUT_TAG: ${{ inputs.tag }}
+          INPUT_RUNNER: ${{ inputs.runner }}
         run: |
           version=$(sed -n -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' .claude-plugin/plugin.json | head -n 1)
           if [ -z "$version" ]; then
@@ -75,8 +90,17 @@ jobs:
           if [ "$EVENT" = push ]; then
             tag=$REF_NAME
             dry_run=false
+            runner=auto
           else
             dry_run=$INPUT_DRY_RUN
+            runner=${INPUT_RUNNER:-auto}
+            case $runner in
+              auto | apple-silicon | intel) ;;
+              *)
+                echo "::error::Unknown runner $runner (pick auto, apple-silicon or intel)"
+                exit 1
+                ;;
+            esac
             if [ -n "$INPUT_TAG" ]; then
               tag=$INPUT_TAG
             elif [ "$REF_TYPE" = tag ]; then
@@ -94,16 +118,18 @@ jobs:
             echo "::error::Tag $tag doesn't match plugin.json's version $version (the tag should be v$version)"
             exit 1
           fi
-          echo "Tag $tag matches plugin.json's version $version (dry run: $dry_run)"
+          echo "Tag $tag matches plugin.json's version $version (dry run: $dry_run, runner: $runner)"
           {
             echo "tag=$tag"
             echo "version=$version"
             echo "dry_run=$dry_run"
+            echo "runner=$runner"
           } >> "$GITHUB_OUTPUT"
 
   build-apple-silicon:
     name: build (Apple silicon)
     needs: check
+    if: needs.check.outputs.runner != 'intel'
     runs-on: macos-latest
     timeout-minutes: 30
     outputs:
@@ -130,8 +156,10 @@ jobs:
     if: >-
       !cancelled()
       && needs.check.result == 'success'
-      && (needs.build-apple-silicon.result == 'cancelled' || needs.build-apple-silicon.result == 'failure')
-      && needs.build-apple-silicon.outputs.started != 'true'
+      && (needs.check.outputs.runner == 'intel'
+        || (needs.check.outputs.runner == 'auto'
+          && (needs.build-apple-silicon.result == 'cancelled' || needs.build-apple-silicon.result == 'failure')
+          && needs.build-apple-silicon.outputs.started != 'true'))
     runs-on: macos-26-intel
     timeout-minutes: 30
     outputs:
@@ -142,7 +170,14 @@ jobs:
         run: echo "started=true" >> "$GITHUB_OUTPUT"
 
       - name: Say why the build runs on Intel
-        run: echo "::notice::No Apple silicon runner picked up the build, so it runs on an Intel Mac"
+        env:
+          RUNNER: ${{ needs.check.outputs.runner }}
+        run: |
+          if [ "$RUNNER" = intel ]; then
+            echo "::notice::The run asked for an Intel Mac"
+          else
+            echo "::notice::No Apple silicon runner picked up the build, so it runs on an Intel Mac"
+          fi
 
       - uses: actions/checkout@v7
 
@@ -238,6 +273,22 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Say how to retry
+        env:
+          RUNNER: ${{ needs.check.outputs.runner }}
+          TAG: ${{ needs.check.outputs.tag }}
+          DRY_RUN: ${{ needs.check.outputs.dry_run }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          echo "::error::Neither an Apple silicon nor an Intel Mac runner picked up the build, so nothing was published. Re-run all jobs once Mac runners are free."
+          retry="gh workflow run release.yml --ref $REF_NAME -f tag=$TAG -f dry_run=$DRY_RUN"
+          case $RUNNER in
+            apple-silicon)
+              echo "::error::No Apple silicon runner picked up the build, so nothing was published. Re-run all jobs once runners are free, or build on Intel: $retry -f runner=intel"
+              ;;
+            intel)
+              echo "::error::No Intel runner picked up the build, so nothing was published. Re-run all jobs once runners are free, or build on Apple silicon: $retry -f runner=apple-silicon"
+              ;;
+            *)
+              echo "::error::Neither an Apple silicon nor an Intel runner picked up the build, so nothing was published. Re-run all jobs once runners are free, or start a new run that skips the wait for Apple silicon: $retry -f runner=intel"
+              ;;
+          esac
           exit 1
