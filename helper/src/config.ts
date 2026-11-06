@@ -71,6 +71,19 @@ export function loadConfig(paths: Paths): Config {
   };
 }
 
+/** How often the helper checks Discord for messages on battery power, unless `config.json` says otherwise. */
+export const DEFAULT_BATTERY_POLL_MINUTES = 5;
+
+/**
+ * `batteryPollMinutes` from `config.json`: minutes between checks on battery power, at least 1. A value that
+ * isn't a positive number is ignored and the default, 5, is used.
+ */
+export function batteryPollMinutes(config: Config): number {
+  const value = config.batteryPollMinutes;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return DEFAULT_BATTERY_POLL_MINUTES;
+  return Math.max(1, value);
+}
+
 export function saveConfig(paths: Paths, config: Config): void {
   ensurePrivateDir(paths.dir);
   writeFileAtomic(paths.config, `${JSON.stringify(config, null, 2)}\n`);
