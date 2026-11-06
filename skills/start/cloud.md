@@ -76,6 +76,9 @@ Each cloud task gets its own branch, `<prefix>/<name>` with one of the user's pr
 
 - **Pushes you make:** `git push -u origin <branch>` before the dispatch, and `git push origin --delete <branch>` after the merge. Never `main`.
 - **Pushes the cloud agent makes:** `git push origin <branch>` after each commit, and only when `CLOUD_CHECK=true`.
+- **When SSH is blocked:** if `git push origin …` fails because SSH to github.com is blocked, push to the HTTPS address, `https://github.com/<owner>/<repo>.git` (`<url>` below), with `gh` supplying the login: `git -c credential.helper= -c credential.helper='!gh auth git-credential' push <url> <branch>`. A push to a URL doesn't create or update `origin/<branch>`, so:
+  - after such a push, and wherever a step says `git fetch origin <branch>`, run `git fetch <url> <branch>:refs/remotes/origin/<branch>` with the same `-c` options, so the steps that use `origin/<branch>` work;
+  - after deleting the branch through the URL (`push <url> --delete <branch>`), remove the leftover ref with `git branch -dr origin/<branch>`, and the upstream, if the branch has one, with `git branch --unset-upstream <branch>`.
 
 1. **Before dispatch:**
    - Create the branch from `main` with `git branch <branch> main`. Don't give it a worktree yet. Git won't check out a branch that another worktree holds, so a worktree on it would block the agent's `git checkout <branch>` in a fallback and your `git branch -f` after a cloud run.
