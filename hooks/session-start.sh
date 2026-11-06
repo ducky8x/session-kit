@@ -29,6 +29,15 @@ json_bool() {
     head -n 1
 }
 
+# json_obj <flattened json> <key>: print the body of the object <key>, if
+# any, without its braces. The object must hold no other object; braces
+# inside its string values are fine.
+json_obj() {
+  printf '%s' "$1" |
+    sed -n -E 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*\{(([^{}"]|"([^"\\]|\\.)*")*)\}.*/\1/p' |
+    head -n 1
+}
+
 file_size() { wc -c < "$1" 2>/dev/null | tr -d ' '; }
 
 print_rules() {
@@ -52,14 +61,18 @@ print_rules() {
 }
 
 # describe_setup <state file>: one line such as
-# "Workflow: multi-agent · Autonomous: ON (this session)".
+# "Workflow: multi-agent · Autonomous: ON (this session) · Cloud agents: ON".
+# The cloud part is left out when the file has no cloud object.
 describe_setup() {
-  local state workflow on scope task w a
+  local state auto cloud workflow on scope task w a c=""
   state=$(tr '\n\r\t' '   ' < "$1" 2>/dev/null)
   workflow=$(json_str "$state" workflow)
-  on=$(json_bool "$state" on)
-  scope=$(json_str "$state" scope)
-  task=$(json_str "$state" task | sed -e 's/\\[nrt]/ /g' -e 's/\\"/"/g' -e 's/\\\\/\\/g')
+  # "on" is a key in both objects, so read each one inside its own object.
+  auto=$(json_obj "$state" autonomous)
+  cloud=$(json_obj "$state" cloud)
+  on=$(json_bool "$auto" on)
+  scope=$(json_str "$auto" scope)
+  task=$(json_str "$auto" task | sed -e 's/\\[nrt]/ /g' -e 's/\\"/"/g' -e 's/\\\\/\\/g')
   case $workflow in
     single) w="single-agent" ;;
     multi) w="multi-agent" ;;
@@ -79,7 +92,16 @@ describe_setup() {
   else
     a="OFF"
   fi
-  printf 'Workflow: %s · Autonomous: %s' "$w" "$a"
+  if [ -n "$cloud" ]; then
+    if [ "$(json_bool "$cloud" on)" != true ]; then
+      c=" · Cloud agents: OFF"
+    elif [ "$(json_str "$cloud" remote)" = unavailable ]; then
+      c=" · Cloud agents: ON (running locally: not available)"
+    else
+      c=" · Cloud agents: ON"
+    fi
+  fi
+  printf 'Workflow: %s · Autonomous: %s%s' "$w" "$a" "$c"
 }
 
 # print_discord <hook input>: run discord.sh session-start with the same
@@ -94,7 +116,7 @@ print_discord() {
 }
 
 main() {
-  local raw="" input sid source state_dir state_file
+  local raw="" input sid source state_dir state_file state
   [ -n "${HOME:-}" ] || return 0
   if [ ! -t 0 ]; then
     raw=$(cat 2>/dev/null)
@@ -127,9 +149,14 @@ main() {
       ;;
     *)
       if [ -f "$state_file" ]; then
+        state=$(tr '\n\r\t' '   ' < "$state_file" 2>/dev/null)
         printf 'Session setup (restored): %s\n' "$(describe_setup "$state_file")"
         printf 'This setup was saved earlier in this session. Keep working with it: don'"'"'t ask the startup questions again, and don'"'"'t toggle autonomous mode because of this note.\n'
-        if [ "$source" = resume ] && [ "$(json_bool "$(tr '\n\r\t' '   ' < "$state_file")" on)" = true ]; then
+        if [ "$(json_bool "$(json_obj "$state" cloud)" on)" = true ]; then
+          printf 'Cloud agent rules: %s (read it before dispatching).\n' \
+            "${CLAUDE_PLUGIN_ROOT:-the session-kit plugin folder}/skills/start/cloud.md"
+        fi
+        if [ "$source" = resume ] && [ "$(json_bool "$(json_obj "$state" autonomous)" on)" = true ]; then
           printf 'Background commands and heartbeats from before the resume have stopped. If unattended work is still under way, start keep-awake and the heartbeat again as described in %s, and record the new ids in the state file. Read that file rather than invoking the skill, which would toggle the mode.\n' \
             "${CLAUDE_PLUGIN_ROOT:-the session-kit plugin folder}/skills/autonomous-mode/SKILL.md"
         fi
