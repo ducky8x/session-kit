@@ -21,11 +21,11 @@ A task needs the Mac when it does any of these:
 
 1. Runs macOS-only tools: `xcodebuild`, `swift` with `DEVELOPER_DIR`, `codesign`, `notarytool`, `osascript`, `launchctl`, `security`, `open`, `defaults`, `screencapture`.
 2. Builds, launches or tests a macOS or iOS app, or uses the iOS Simulator.
-3. Reads or writes anything outside the repo, such as `~/.claude`, `~/Movies` or `~/Projects/App Outputs`, or the user's real data, settings or apps.
+3. Reads or writes anything outside the repo, such as `~/.claude`, `~/Movies` or `~/Downloads`, or the user's real data, settings or apps.
 4. Needs work that can't be pushed: the repo has no GitHub remote, or the user said not to push this work.
 5. Needs the screen, a browser pane, computer use, hardware, or a local server the user watches.
 6. Needs secrets kept on the Mac, such as the Keychain or a `.env` file that isn't in git.
-7. Runs one command longer than about 40 minutes that can't save checkpoints and resume.
+7. Runs one command longer than about 9 minutes that can't save checkpoints and resume.
 8. Would produce a single output file over 2 GB, the release asset limit.
 
 Unsure: local.
@@ -33,15 +33,15 @@ Unsure: local.
 Examples that go to the cloud:
 
 - research;
-- code changes with tests that run on Linux, such as the helper's bun tests, which already run on ubuntu CI;
+- code changes with tests that run on Linux;
 - docs and wording passes;
 - training that can save checkpoints.
 
 Examples that stay local:
 
-- sTools builds;
+- builds of a macOS app;
 - anything under `~/.claude`;
-- Discord helper checks;
+- checks of session-kit's Discord helper;
 - signing.
 
 Cloud tasks and local tasks can run side by side. The rule against two agents on the same files still holds.
