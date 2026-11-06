@@ -438,3 +438,46 @@ describe("Discord off or not set up", () => {
     expect(k.gateway.connections).toHaveLength(1);
   });
 });
+
+describe("status on battery", () => {
+  test("keeps the code connected and adds the battery line", async () => {
+    const k = await batteryKit();
+    const r = await k.cli(["status"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toBe(
+      ["connected", "On battery: checking Discord every 5 minutes.", "Sessions: 0 (0 with a channel, 0 archived)", ""].join("\n"),
+    );
+    const json = JSON.parse((await k.cli(["status", "--json"])).out);
+    expect(json).toMatchObject({ status: "connected", onBattery: true, pollMinutes: 5 });
+    expect(json.fix).toBeUndefined();
+  });
+
+  test("on AC there is no battery line", async () => {
+    const k = await batteryKit({ power: "ac" });
+    await k.connected();
+    expect((await k.cli(["status"])).out).not.toContain("On battery");
+  });
+
+  test("batteryPollMinutes sets the wait, and a reload applies a new one", async () => {
+    const k = await batteryKit();
+    k.setConfig((c) => {
+      c.batteryPollMinutes = 2;
+    });
+    await k.call({ op: "reload" });
+    await k.settleAll();
+    expect((await k.cli(["status"])).out).toContain("On battery: checking Discord every 2 minutes.\n");
+    const reads = k.reads().length;
+    await k.tick(2 * MINUTE_MS);
+    expect(k.reads()).toHaveLength(reads + 1);
+    k.setConfig((c) => {
+      c.batteryPollMinutes = 1;
+    });
+    await k.call({ op: "reload" });
+    expect((await k.cli(["status"])).out).toContain("On battery: checking Discord every minute.\n");
+    k.setConfig((c) => {
+      c.batteryPollMinutes = "often";
+    });
+    await k.call({ op: "reload" });
+    expect((await k.cli(["status"])).out).toContain("On battery: checking Discord every 5 minutes.\n");
+  });
+});

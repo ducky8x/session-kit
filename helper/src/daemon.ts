@@ -429,6 +429,8 @@ export class Daemon {
       linked: all.filter((e) => e.channelId !== null).length,
       archived: all.filter((e) => e.archived).length,
       outbox: this.outbox.size,
+      // On battery power the code stays `connected`; these say messages are read every few minutes.
+      ...(this.poller.running ? { onBattery: true, pollMinutes: batteryPollMinutes(this.config) } : {}),
     };
   }
 

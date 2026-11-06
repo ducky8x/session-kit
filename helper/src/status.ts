@@ -43,6 +43,11 @@ export const SETUP_NEEDED: ReadonlySet<StatusCode> = new Set([
   "not-in-server",
 ]);
 
+/** The line `status` adds while the helper checks Discord on a timer on battery power. */
+export function batteryLine(minutes: number): string {
+  return `On battery: checking Discord every ${minutes === 1 ? "minute" : `${minutes} minutes`}.`;
+}
+
 /** What `send` and the hooks print when nothing answers on the socket. */
 export const HELPER_DOWN =
   "The Discord helper isn't running (launchctl kickstart -k gui/$UID/io.github.ducky8x.session-kit.discord)";
