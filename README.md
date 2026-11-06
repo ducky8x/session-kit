@@ -120,6 +120,8 @@ To turn it on, answer Yes when your first session after installing session-kit a
 
 Keep Discord notifications on, and set the server to All Messages (server name > Notification Settings). The bot @mentions you only when a session is waiting on you, such as for a permission prompt or a question nobody answered at the keyboard. Keep the server to yourself: anyone else in it can read every post.
 
+On battery power the helper keeps no live connection to Discord. It checks for new messages every 5 minutes instead, so what you type in a channel can take up to 5 minutes to reach the session; posts from sessions still go out at once. When the Mac is back on AC power, it reconnects and picks up anything sent since the last check. To check more or less often, set `batteryPollMinutes` in `~/.claude/session-kit/discord/config.json` (at least 1), then run `/discord on`.
+
 `/discord status` shows whether the helper is connected and what to fix if it isn't. `/discord off` stops new channels and posts but keeps the setup, so `/discord on` turns it back on. After a plugin update, the session-start hook updates the helper to the plugin's version by itself.
 
 The helper is `~/.claude/session-kit/bin/sk-discord`. Its settings, session list and log are in `~/.claude/session-kit/discord/`, and a LaunchAgent, `~/Library/LaunchAgents/io.github.ducky8x.session-kit.discord.plist`, starts it at login.
