@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Discord on battery power: the helper drops its live connection and checks for new messages every 5 minutes (`batteryPollMinutes` in `config.json` changes that), then reconnects and catches up on AC power. Posts still go out at once, and `sk-discord status` says when it's on battery.
 - The release build falls back to an Intel Mac runner when no Apple silicon runner is free.
 - Cloud agents: a startup question that sends worker tasks that don't need your computer to cloud subagents, once Claude Code offers them. Until then they run locally.
 

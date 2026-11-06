@@ -98,6 +98,7 @@ When the session-start hook prints a `Discord:` line with a listener command, st
 - The listener waits for one event, prints it as one JSON line and exits, so an idle session costs nothing. When its output arrives, handle the event, then start the listener again.
 - Start it again after every event except `disabled`, `unlinked` and `replaced`. Keep exactly one running: after a summary of the chat, the one you started earlier may still be running, so check your background tasks first. If two do run, the helper keeps the newer one and ends the older one with `replaced`.
 - Don't poll. Events come to you.
+- On battery power the helper keeps no live connection to Discord and checks for new messages every 5 minutes, so a message the user types in Discord can take up to 5 minutes to reach you. Posts with `send` still go out at once.
 - Events that arrived while nothing was listening come with `"queued": true`. Handle them in order, like any other event.
 
 ### When to post

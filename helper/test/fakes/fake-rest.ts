@@ -26,12 +26,17 @@ export interface FakeMessage {
   allowed_mentions?: unknown;
   author: { id: string; bot: boolean };
   edited: boolean;
+  /** 0 a plain message, 19 a reply. */
+  type?: number;
+  attachments?: unknown[];
 }
 
 export interface RecordedRequest {
   method: string;
   /** The path after the API base, such as `/channels/1/messages`. */
   path: string;
+  /** The query string, such as `?after=1&limit=100`, or "". */
+  query: string;
   body: any;
   authorization: string | null;
   userAgent: string | null;
@@ -125,6 +130,28 @@ export class FakeDiscordRest {
     this.headerRules.push({ ...o, times: o.times ?? 1 });
   }
 
+  /** A message someone typed in a channel: the owner's, unless `author` says otherwise. */
+  addMessage(o: {
+    channelId: string;
+    content: string;
+    author?: { id: string; bot?: boolean };
+    type?: number;
+    attachments?: unknown[];
+    id?: string;
+  }): FakeMessage {
+    const message: FakeMessage = {
+      id: o.id ?? this.newId(),
+      channel_id: o.channelId,
+      content: o.content,
+      author: { id: o.author?.id ?? OWNER_ID, bot: o.author?.bot ?? false },
+      edited: false,
+      type: o.type ?? 0,
+      attachments: o.attachments ?? [],
+    };
+    this.messages.push(message);
+    return message;
+  }
+
   // ---- what tests read back ---------------------------------------------------
 
   channelNamed(name: string): FakeChannel | undefined {
@@ -170,6 +197,7 @@ export class FakeDiscordRest {
     this.requests.push({
       method,
       path,
+      query: url.search,
       body,
       authorization: req.headers.get("authorization"),
       userAgent: req.headers.get("user-agent"),
@@ -182,7 +210,7 @@ export class FakeDiscordRest {
       return this.json(override.status, override.body ?? {}, override.headers);
     }
 
-    const response = this.route(method, path, body);
+    const response = this.route(method, path, body, url.searchParams);
     const rule = this.headerRules.find((r) => r.times > 0 && matches(r, method, path));
     if (rule && response.status < 400) {
       rule.times--;
@@ -192,7 +220,7 @@ export class FakeDiscordRest {
     return response;
   }
 
-  private route(method: string, path: string, body: any): Response {
+  private route(method: string, path: string, body: any, query: URLSearchParams): Response {
     let m: RegExpExecArray | null;
     // The bot's own user ("@me") and the servers it is in.
     if (method === "GET" && /^\/users\/@me\/guilds$/.test(path)) return this.json(200, this.guilds);
@@ -220,6 +248,11 @@ export class FakeDiscordRest {
       }
       if (method === "PATCH") return this.patchChannel(channel, body);
     }
+    if ((m = /^\/channels\/(\d+)\/messages$/.exec(path)) && method === "GET") {
+      const channel = this.channels.get(m[1]!);
+      if (!channel) return this.error(404, 10003, "Unknown Channel");
+      return this.json(200, this.listMessages(channel.id, query));
+    }
     if ((m = /^\/channels\/(\d+)\/messages$/.exec(path)) && method === "POST") {
       const channel = this.channels.get(m[1]!);
       if (!channel) return this.error(404, 10003, "Unknown Channel");
@@ -244,6 +277,21 @@ export class FakeDiscordRest {
       return this.json(200, message);
     }
     return this.error(404, 0, "404: Not Found");
+  }
+
+  /**
+   * A channel's messages as Discord lists them: with `after`, the `limit` oldest ones after that id; without it,
+   * the `limit` newest. Either way the newest comes first. `limit` is 50 unless given, and 100 at most.
+   */
+  private listMessages(channelId: string, query: URLSearchParams): FakeMessage[] {
+    const asked = Number.parseInt(query.get("limit") ?? "50", 10);
+    const limit = Math.min(100, Math.max(1, Number.isFinite(asked) ? asked : 50));
+    const all = this.messages
+      .filter((x) => x.channel_id === channelId)
+      .sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : 1));
+    const after = query.get("after");
+    const picked = after === null ? all.slice(-limit) : all.filter((x) => BigInt(x.id) > BigInt(after)).slice(0, limit);
+    return picked.reverse();
   }
 
   private createChannel(body: any): Response {

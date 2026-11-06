@@ -8,6 +8,8 @@ export interface Paths {
   config: string;
   sessions: string;
   outbox: string;
+  /** The newest message seen in each channel the helper reads (see `poller.ts`). */
+  cursors: string;
   log: string;
   /** The control socket (0600). */
   socket: string;
@@ -30,6 +32,7 @@ export function pathsFor(home: string): Paths {
     config: join(dir, "config.json"),
     sessions: join(dir, "sessions.json"),
     outbox: join(dir, "outbox.jsonl"),
+    cursors: join(dir, "cursors.json"),
     log: join(dir, "helper.log"),
     socket: join(dir, "helper.sock"),
     bin: join(kit, "bin", "sk-discord"),

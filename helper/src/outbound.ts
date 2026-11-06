@@ -106,7 +106,10 @@ export class Outbox {
     this.kick();
   }
 
-  /** The gateway connected (true) or dropped (false). Coming online sends what is waiting. */
+  /**
+   * Discord became reachable (true: the gateway connected, or checks on battery power began) or not (false).
+   * Coming online sends what is waiting.
+   */
   setOnline(online: boolean): void {
     this.online = online;
     if (online) {
