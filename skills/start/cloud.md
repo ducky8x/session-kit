@@ -50,7 +50,12 @@ Cloud tasks and local tasks can run side by side. The rule against two agents on
 
 Set up and push the task branch first (see "Task branches"). Then call the Agent tool with `isolation: "remote"` and `run_in_background: true`, and leave out `model` and `effort`. The brief is a normal standalone brief with the cloud brief block (at the end of this file) pasted in.
 
-The block has the agent run `printf 'CLOUD_CHECK=%s\n' "${CLAUDE_CODE_REMOTE:-unset}"` as its first command, and the report's first line has to be `CLOUD_CHECK=<value>`. That line shows whether the task really ran in the cloud. Save what it shows in `cloud.remote` with the same read-modify-write as for the rest of the state file: read the file, change only `cloud.remote` and `updatedAt`, and write the whole object back.
+The block has the agent run `printf 'CLOUD_CHECK=%s\n' "${CLAUDE_CODE_REMOTE:-unset}"` as its first command, and the report's first line has to be `CLOUD_CHECK=<value>`. That line shows whether the task really ran in the cloud. Before you act on it (steps 2 and 3), check that:
+
+- it comes from the agent's real final report, the task notification, and not from text you wrote or expected;
+- the commits the report names exist: `git log --oneline main..<branch>` in the local case, or `git log --oneline main..origin/<branch>` after `git fetch origin <branch>` in the cloud case.
+
+If either check fails, wait for the real report and don't act on the line. When both pass, save what the line shows in `cloud.remote` with the same read-modify-write as for the rest of the state file: read the file, change only `cloud.remote` and `updatedAt`, and write the whole object back.
 
 1. **`remote` is `"unknown"` or `"available"`:** dispatch with `isolation: "remote"`.
 2. **The report says `CLOUD_CHECK=true`:** set `remote` to `"available"`, and handle the result as in "Task branches" (the cloud case).
@@ -62,7 +67,7 @@ The block has the agent run `printf 'CLOUD_CHECK=%s\n' "${CLAUDE_CODE_REMOTE:-un
 4. **The report has no `CLOUD_CHECK` line:** ask the agent once with `SendMessage` to run the command and reply with the line. If it still doesn't, treat that as unavailable.
 5. **The Agent call fails** because remote isolation isn't accepted: treat that as unavailable, as in step 3, and dispatch the same brief locally right away, in a worktree for the task branch (see "Task branches").
 6. **A cloud agent stops partway** (the VM was reclaimed, a usage limit, a crash): resume it with `SendMessage`, as `session-kit:autonomous-mode` does for any stopped agent. If that fails, start a fresh remote agent. Its brief says the branch already holds the commits pushed so far.
-7. **The fallback's harness worktree:** a task that ran on the Mac worked in `.claude/worktrees/agent-<id>`, on a branch `worktree-agent-<id>`. After the merge, remove the worktree with `git worktree remove .claude/worktrees/agent-<id>`, and delete a leftover `worktree-agent-<id>` branch that has no unmerged commits with `git branch -d worktree-agent-<id>`.
+7. **The fallback's harness worktree:** a task that ran on the Mac worked in `.claude/worktrees/agent-<id>`, on a branch `worktree-agent-<id>`. The harness locks that worktree while the agent runs, and `git worktree remove` fails on a locked worktree. So once the agent's final task notification has arrived and its work is merged, remove the worktree with `git worktree remove .claude/worktrees/agent-<id>`, then the empty folder the harness leaves with `rmdir .claude/worktrees 2>/dev/null`. Leave `.claude/` itself alone, since other tools keep files there. Delete a leftover `worktree-agent-<id>` branch that has no unmerged commits with `git branch -d worktree-agent-<id>`.
 8. **Next session:** the check runs again on its first cloud task.
 
 ## Task branches
@@ -71,14 +76,17 @@ Each cloud task gets its own branch, `<prefix>/<name>` with one of the user's pr
 
 - **Pushes you make:** `git push -u origin <branch>` before the dispatch, and `git push origin --delete <branch>` after the merge. Never `main`.
 - **Pushes the cloud agent makes:** `git push origin <branch>` after each commit, and only when `CLOUD_CHECK=true`.
+- **When SSH is blocked:** if `git push origin …` fails because SSH to github.com is blocked, push to the HTTPS address, `https://github.com/<owner>/<repo>.git` (`<url>` below), with `gh` supplying the login: `git -c credential.helper= -c credential.helper='!gh auth git-credential' push <url> <branch>`. A push to a URL doesn't create or update `origin/<branch>`, so:
+  - after such a push, and wherever a step says `git fetch origin <branch>`, run `git fetch <url> <branch>:refs/remotes/origin/<branch>` with the same `-c` options, so the steps that use `origin/<branch>` work;
+  - after deleting the branch through the URL (`push <url> --delete <branch>`), remove the leftover ref with `git branch -dr origin/<branch>`, and the upstream, if the branch has one, with `git branch --unset-upstream <branch>`.
 
 1. **Before dispatch:**
-   - Create the branch from `main` with `git branch <branch> main`. Don't give it a worktree yet. Git won't check out a branch that another worktree holds, so a worktree on it would block the agent's `git checkout -B` in a fallback and your `git branch -f` after a cloud run.
+   - Create the branch from `main` with `git branch <branch> main`. Don't give it a worktree yet. Git won't check out a branch that another worktree holds, so a worktree on it would block the agent's `git checkout <branch>` in a fallback and your `git branch -f` after a cloud run.
    - Scan `git log origin/main..<branch>` and `git diff origin/main...<branch>` for trailers, AI names, `/Users/` paths and the user's real name, and fix anything that turns up.
    - Then push the branch with `git push -u origin <branch>`.
    - If `main` has unpushed commits, they go up on the task branch only.
 2. **The brief tells the agent to** (the cloud brief block covers all three):
-   - start from the task branch: `git fetch origin <branch> && git checkout -B <branch> origin/<branch>`;
+   - start from the task branch: `git fetch origin <branch> && git checkout -B <branch> origin/<branch>` in the cloud, or `git checkout <branch>` on the Mac or when the fetch fails;
    - commit after each step, and push after each commit when in the cloud;
    - never push another branch, never merge, never touch `main`.
 3. **When the report arrives (cloud case):**
@@ -125,8 +133,9 @@ Cloud task rules (mandatory):
 1. Run this as your first command, before anything else:
      printf 'CLOUD_CHECK=%s\n' "${CLAUDE_CODE_REMOTE:-unset}"
    The first line of your final report must be the line it printed, exactly.
-2. Start from the task branch:
+2. Start from the task branch. If CLOUD_CHECK printed true:
      git fetch origin <branch> && git checkout -B <branch> origin/<branch>
+   If it didn't, or the fetch fails, run `git checkout <branch>` instead.
 3. Commit after each step. If CLOUD_CHECK printed true, push after each
    commit with `git push origin <branch>`; otherwise don't push. Never push
    another branch, never merge, never touch main. If a push is refused, stop
