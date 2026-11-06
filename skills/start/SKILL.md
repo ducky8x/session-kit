@@ -1,11 +1,11 @@
 ---
 name: start
-description: Set up how this session runs, single-agent or multi-agent and autonomous or not, save the choice, then work that way. The session-kit SessionStart hook asks for it at the start of every new session. Also use mid-session when the user types /start or asks to switch ("go multi-agent", "switch to single-agent", "turn autonomous on for the session"), or asks to create a rules file for session-kit.
+description: Set up how this session runs, single-agent or multi-agent, autonomous or not, and cloud agents or not, save the choice, then work that way. The session-kit SessionStart hook asks for it at the start of every new session. Also use mid-session when the user types /start or asks to switch ("go multi-agent", "switch to single-agent", "turn autonomous on for the session", "turn cloud agents on"), or asks to create a rules file for session-kit.
 ---
 
 # Start
 
-This skill sets two things for the session: the workflow (single-agent or multi-agent) and whether it runs autonomously. It saves them in a state file, so the setup survives a summary of the chat (compaction) and a resume.
+This skill sets three things for the session: the workflow (single-agent or multi-agent), whether it runs autonomously, and whether worker tasks may run as cloud agents. It saves them in a state file, so the setup survives a summary of the chat (compaction) and a resume.
 
 ## State file
 
@@ -17,19 +17,21 @@ The file holds one JSON object. A missing field means not set.
 {
   "workflow": "multi",
   "autonomous": { "on": true, "scope": "session" },
+  "cloud": { "on": true, "remote": "unknown" },
   "updatedAt": "2026-01-01T12:00:00Z"
 }
 ```
 
 - `workflow` is `"single"` or `"multi"`. This skill owns it.
-- `autonomous` belongs to the `session-kit:autonomous-mode` skill, which adds the scope, the task and the ids of its background jobs. When you change `workflow`, keep the other fields as they are.
+- `autonomous` belongs to the `session-kit:autonomous-mode` skill, which adds the scope, the task and the ids of its background jobs. When you change `workflow` or `cloud`, keep the other fields as they are.
+- `cloud` is the Cloud answer. Yes writes `{ "on": true, "remote": "unknown" }` and No writes `{ "on": false }`. This skill owns `cloud.on`. `remote` says whether cloud subagents really run in the cloud in this session: `"unknown"` until the first cloud task reports back, then `"available"` or `"unavailable"`, set as `cloud.md` in this skill's folder describes.
 
 To update the file, read it if it exists, change only your fields, set `updatedAt` to the current time, and write the whole object back. Use the Write tool with the absolute path from the hook, or a Bash heredoc:
 
 ```bash
 mkdir -p ~/.claude/session-kit/state
 cat > ~/.claude/session-kit/state/${CLAUDE_SESSION_ID}.json <<'EOF'
-{ "workflow": "single", "autonomous": { "on": false }, "updatedAt": "2026-01-01T12:00:00Z" }
+{ "workflow": "single", "autonomous": { "on": false }, "cloud": { "on": false }, "updatedAt": "2026-01-01T12:00:00Z" }
 EOF
 ```
 
@@ -39,13 +41,13 @@ If the write is refused or fails, carry on, and say in one line that the setup w
 
 Ask at the start of a new session, before acting on the user's first message. Skip the questions when:
 
-- the first message already says how to run (for example "multi-agent, autonomous: ..."). Use that, and ask only what it leaves open;
-- you are a subagent, or the session is non-interactive (print mode, `-p`). Don't ask anything; work single-agent unless the request says otherwise;
+- the first message already says how to run (for example "multi-agent, autonomous, cloud: ..." or "single-agent, no cloud: ..."). Use that, and ask only what it leaves open. "cloud" answers the Cloud question Yes, and "no cloud" answers it No;
+- you are a subagent, or the session is non-interactive (print mode, `-p`). Don't ask anything and don't write `cloud`; work single-agent unless the request says otherwise;
 - the hook restored a setup after a resume or a summary of the chat (`Session setup (restored): ...`), or the conversation already settled it.
 
 ## How to ask
 
-Make one `AskUserQuestion` call with two questions, or three when Discord hasn't been offered yet (see "Discord offer"). Don't mark any option "(Recommended)": this is the user's choice.
+Make one `AskUserQuestion` call with up to four questions: Workflow, Autonomous and Cloud every time, plus Discord when it hasn't been offered yet (see "Discord offer"). Don't mark any option "(Recommended)": this is the user's choice.
 
 1. Question "Which workflow should this session run on?", header "Workflow":
    - **Single-agent**: "One agent does all the work itself."
@@ -53,14 +55,17 @@ Make one `AskUserQuestion` call with two questions, or three when Discord hasn't
 2. Question "Should this session run autonomously?", header "Autonomous":
    - **No**: "Ask me when a decision is mine to make."
    - **Yes**: "Don't ask me anything; decide, note the assumption, keep going."
-3. Only when the session-start hook printed `Discord: not offered yet.`: question "Set up Discord now?", header "Discord". Mark neither option as the default:
+3. Question "Use cloud agents for worker tasks?", header "Cloud". Mark neither option as the default:
+   - **No**: "Worker agents run on this computer."
+   - **Yes**: "In multi-agent sessions, tasks that don't need this computer run as cloud subagents once Claude Code offers them; until then they run here."
+4. Only when the session-start hook printed `Discord: not offered yet.`: question "Set up Discord now?", header "Discord". Mark neither option as the default:
    - **Yes**: "Set up a private Discord server where each session gets a channel for its updates and your replies. Runs after these questions."
    - **No**: "Don't set it up. You can turn it on later with /discord on."
 
 Then, in the same turn:
 
-1. Write the state file: `workflow`, plus `"autonomous": { "on": false }` if the Autonomous answer was No.
-2. Say the result in one line, for example `Workflow: multi-agent · Autonomous: ON`.
+1. Write the state file: `workflow`; `"autonomous": { "on": false }` if the Autonomous answer was No; and `cloud`, which is `{ "on": true, "remote": "unknown" }` if the Cloud answer was Yes and `{ "on": false }` if it was No.
+2. Say the result in one line, for example `Workflow: multi-agent · Autonomous: ON · Cloud agents: ON`.
 3. If the Autonomous answer was Yes, invoke `session-kit:autonomous-mode`. That turns it on for the whole session.
 4. If a `.agentcontext` file exists in the current folder or any parent folder, invoke `session-kit:load-context`. It keeps its brief short when a request is waiting. To check:
 
@@ -75,7 +80,7 @@ Follow the same steps when you skipped the questions because the first message s
 
 ## Discord offer
 
-On macOS, while `~/.claude/session-kit/discord/config.json` doesn't exist (Discord was never offered or set up), the session-start hook prints `Discord: not offered yet.` Only then add the third question. Ask it even when the first message settled the other two, and only once in a session: a later `/start` doesn't ask it again.
+On macOS, while `~/.claude/session-kit/discord/config.json` doesn't exist (Discord was never offered or set up), the session-start hook prints `Discord: not offered yet.` Only then add the fourth question. Ask it even when the first message settled the other three, and only once in a session: a later `/start` doesn't ask it again.
 
 - **Yes**: after steps 1 to 4, invoke `session-kit:discord`, which runs its guided setup. The user's first request waits until the setup is done or the user sets it aside.
 - **No**: save the answer so it isn't offered again, then say in one line that Discord can be turned on later with `/discord on`:
@@ -89,7 +94,7 @@ On macOS, while `~/.claude/session-kit/discord/config.json` doesn't exist (Disco
 
 ## If the question goes unanswered
 
-When an answer timeout is set, an unanswered question closes by itself with a note that the user may be away from the keyboard. Treat that as no answer: use **Single-agent** and **Autonomous: ON**, say so, and follow the steps above.
+When an answer timeout is set, an unanswered question closes by itself with a note that the user may be away from the keyboard. Treat that as no answer: use **Single-agent**, **Autonomous: ON** and **Cloud: No**, say so, and follow the steps above.
 
 ## Standing rule: an unanswered question means work autonomously
 
@@ -116,6 +121,8 @@ Then tell the user to edit it, that it loads in full only while it stays under 8
 ## Single-agent
 
 Do the work yourself. Spawn subagents only when the user asks for them.
+
+A Cloud answer of Yes is saved and restated, but a single-agent session sends nothing to cloud agents.
 
 ## Multi-agent
 
@@ -150,6 +157,8 @@ How to manage:
 
 Reading files to plan or review is fine.
 
+When `cloud.on` is true in the state file, read `${CLAUDE_SKILL_DIR}/cloud.md` before the first dispatch. It says which tasks go to cloud agents, how to dispatch them, and how their work comes back. It also covers the pushes that cloud mode allows without asking: task branches and draft releases, never `main`.
+
 ## Keep working while a question is open
 
 An `AskUserQuestion` pauses your turn until it's answered or times out. Background agents and background commands keep running meanwhile.
@@ -161,8 +170,11 @@ An `AskUserQuestion` pauses your turn until it's answered or times out. Backgrou
 
 - The user asks to switch ("go multi-agent", "switch to single-agent"): update `workflow` in the state file and say the new setup in one line. Don't ask again.
 - The user asks to turn autonomous mode on or off: if the state file shows it already in that state, say so. Otherwise invoke `session-kit:autonomous-mode`, which updates the state file.
-- The user types `/start` (or `/session-kit:start`): if it comes with a setup ("/start multi-agent"), apply that. Otherwise ask the two questions again. Apply only what changed: invoke `session-kit:autonomous-mode` only when the answer differs from what the state file says, since each invocation flips it.
+- The user asks to turn cloud agents on or off ("turn cloud agents on", "turn cloud agents off"): set `cloud.on` in the state file and say the new setup in one line. Turning it on writes `{ "on": true, "remote": "unknown" }`, so the next cloud task checks again whether cloud subagents are available.
+- The user types `/start` (or `/session-kit:start`): if it comes with a setup ("/start multi-agent", "/start cloud on", "/start cloud off"), apply that. Otherwise ask the three questions again. Apply only what changed: invoke `session-kit:autonomous-mode` only when the answer differs from what the state file says, since each invocation flips it.
 
 ## After a resume, a fork or a summary of the chat
 
-The hook restates the saved setup. Keep working with it: don't ask the questions again, and don't toggle autonomous mode because of the note. If the hook says no setup was saved but the conversation shows one (after a fork, for example), write that setup to this session's state file without asking.
+The hook restates the saved setup. Keep working with it: don't ask the questions again, and don't toggle autonomous mode because of the note. If the hook says no setup was saved but the conversation shows one (after a fork, for example), write that setup to this session's state file without asking, `cloud` included, with `remote` as the conversation last showed it.
+
+When cloud is on, the hook also prints `Cloud agent rules: <path> (read it before dispatching).` A summary of the chat drops what you read before, so read that file again before the next dispatch. Keep `cloud.remote` as the state file has it: `"unavailable"` means later tasks run locally without a new check.
