@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-- Discord on battery power: the helper drops its live connection and checks for new messages every 5 minutes (`batteryPollMinutes` in `config.json` changes that), then reconnects and catches up on AC power. Posts still go out at once, and `sk-discord status` says when it's on battery.
+- Discord on battery power: the helper drops its live connection and checks for new messages every 5 minutes (`batteryPollMinutes` in `config.json` changes that), then reconnects and catches up on AC power. Posts don't wait for those checks, and `sk-discord status` says when it's on battery.
+- Discord posts wait while you're at the computer and go out once you've been away 5 minutes (`awayMinutes` in `config.json`); one made while you're there is dropped if you keep using the computer. Questions and permission prompts go out the first time you're away instead of after 2 minutes, replies to what you type in Discord still go out at once, and a check-in that comes due while you're there is skipped.
+- The Discord bot never @mentions you, so set the server to All Messages to be notified. `sk-discord send --ping` is still accepted but does nothing.
 - The release build falls back to an Intel Mac runner when no Apple silicon runner is free.
 - Cloud agents: a startup question that sends worker tasks that don't need your computer to cloud subagents, once Claude Code offers them. Until then they run locally.
 
