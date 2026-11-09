@@ -91,10 +91,11 @@ Run `~/.claude/session-kit/bin/sk-discord setup launch-agent`. It installs the L
 
 ## 7. Notifications
 
-Tell the user, in these words: "Keep Discord notifications on. Set this server to All Messages (server name > Notification Settings) so every post reaches you; the bot @mentions you only when a session is waiting on you." The welcome post in `#session-kit` says the same.
+Tell the user, in these words: "Keep Discord notifications on, and set this server to All Messages (server name > Notification Settings). The bot never @mentions you, so with any other setting its posts don't notify you." The welcome post in `#session-kit` says the same.
 
-Then tell them two more things:
+Then tell them three more things:
 
+- Posts wait while they're at the computer and go out once they've been away 5 minutes; `awayMinutes` in `config.json` changes that.
 - While a question dialog is open in a session, that session can't act on an answer from Discord until the dialog closes. With `askUserQuestionTimeout` set in their Claude Code settings, the dialog closes by itself after that time; without it, an answer from Discord waits until someone is at the keyboard.
 - Keep the server to themselves: anyone added to it can read every post.
 
