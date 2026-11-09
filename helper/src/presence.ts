@@ -20,7 +20,7 @@ export function parseIdleSeconds(result: RunResult): number | null {
 
 /** One reading of how long the user has gone without touching the keyboard or mouse. */
 export interface IdleReading {
-  /** When it was read. */
+  /** When it was read (just before ioreg ran). */
   at: number;
   /** Milliseconds since the last input, or null when it couldn't be read. */
   idleMs: number | null;
@@ -49,8 +49,9 @@ export class Presence {
   constructor(private readonly d: PresenceDeps) {}
 
   async read(): Promise<IdleReading> {
-    const seconds = parseIdleSeconds(await this.d.runner.run(IOREG, { timeoutMs: IOREG_TIMEOUT_MS }));
+    // The time before ioreg runs: a slow ioreg then makes the last input look older, never newer.
     const at = this.d.clock.now();
+    const seconds = parseIdleSeconds(await this.d.runner.run(IOREG, { timeoutMs: IOREG_TIMEOUT_MS }));
     if (seconds === null) {
       if (!this.failing) this.d.log.warn("could not read the idle time with ioreg; posts go out as if the user were away");
       this.failing = true;
