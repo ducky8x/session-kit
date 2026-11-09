@@ -344,6 +344,7 @@ export class Questions {
         const sessionId = typeof req.sessionId === "string" ? req.sessionId : "";
         // A prompt also means the session's chat is under way, so it gets its channel if it has none.
         if (this.daemon.currentConfig().enabled) this.daemon.channels.activate(sessionId);
+        this.daemon.settlePrompts(sessionId);
         return { closed: this.answeredAtKeyboard(sessionId, null) };
       });
     this.resumeAll();
@@ -384,6 +385,8 @@ export class Questions {
   open(sessionId: string, toolUseId: string | null, items: AskItem[], transcriptPath: string | null = null): string {
     const now = this.daemon.deps.clock.now();
     this.discardHeld(sessionId);
+    // The session got as far as asking, so a permission prompt still held for it was answered.
+    this.daemon.settlePrompts(sessionId);
     const id = `q${now.toString(36)}${this.nextId++}`;
     const record: QuestionRecord = {
       id,

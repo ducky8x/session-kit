@@ -18,6 +18,7 @@ import type { Paths } from "./paths.ts";
 import { CursorStore, MessagePoller } from "./poller.ts";
 import { PowerMonitor } from "./power.ts";
 import { type IdleReading, Presence, isAway } from "./presence.ts";
+import { promptKey, toolResultSince } from "./prompts.ts";
 import type { ProcessRunner } from "./process.ts";
 import type { Keychain } from "./secrets.ts";
 import { ControlServer, HandlerRegistry, type Request, RequestError } from "./server.ts";
@@ -281,6 +282,7 @@ export class Daemon {
     });
     this.power = new PowerMonitor({ runner: d.runner, clock, log, onChange: () => this.onPowerChange() });
     this.server = new ControlServer(paths.socket, this.handlers, log);
+    this.onOpenCheck("prompt", (entry) => this.promptOpen(entry));
     this.addCoreHandlers();
     for (const install of d.extensions ?? []) install(this);
   }
@@ -377,6 +379,21 @@ export class Daemon {
   /** May a post for the session go out now, by this reading: is the user away, or in a conversation there? */
   mayPostNow(sessionId: string, reading: IdleReading): boolean {
     return this.inConversation(sessionId) || isAway(reading, this.awayMs());
+  }
+
+  /**
+   * The session moved on: the user typed a prompt, a turn ended, the session asked a question, posted, or ended.
+   * A permission prompt or input dialog held for it was answered, so it never goes out.
+   */
+  settlePrompts(sessionId: string): void {
+    this.outbox.discardHeld((e) => e.target === sessionId && e.open === promptKey(sessionId));
+  }
+
+  /** Is the permission prompt a held post stands for still waiting? Not once its transcript moved past it. */
+  private async promptOpen(entry: OutboxEntry): Promise<boolean> {
+    const session = this.sessions.get(entry.target);
+    if (!session || session.closedAt !== null) return false;
+    return !(entry.transcriptPath && (await toolResultSince(entry.transcriptPath, entry.madeAt ?? entry.at)));
   }
 
   private async isOpen(entry: OutboxEntry): Promise<boolean> {
@@ -670,7 +687,9 @@ export class Daemon {
       })
       .add("register", (req) => this.register(req))
       .add("ended", (req) => {
-        this.channels.ended(text(req.sessionId, "sessionId"));
+        const sessionId = text(req.sessionId, "sessionId");
+        this.settlePrompts(sessionId);
+        this.channels.ended(sessionId);
         return {};
       })
       .add("send", (req) => this.send(req));
@@ -710,6 +729,10 @@ export class Daemon {
   /**
    * A session posts in its channel. A session the helper does not know is registered first from what the
    * command sends along (its folder and entry point), so Discord turned on mid-session still works.
+   *
+   * With `prompt`, the post is a permission prompt or input dialog from the Notification hook: an open item that
+   * goes out the first time the user is away, unless the session moves on first (see `settlePrompts`). A newer
+   * one takes the place of one still held.
    */
   private async send(req: Request): Promise<Record<string, unknown>> {
     this.requireOn();
@@ -721,7 +744,12 @@ export class Daemon {
     }
     // `ping` from an older session or script is ignored: posts never @mention the user.
     const done = req.done === true;
-    const posted = this.post(sessionId, body);
+    const prompt = req.prompt === true;
+    // Either way, a permission prompt still held is moot: the session posted, or a newer prompt replaces it.
+    this.settlePrompts(sessionId);
+    const posted = prompt
+      ? this.post(sessionId, body, { open: promptKey(sessionId), transcriptPath: optionalText(req.transcriptPath) })
+      : this.post(sessionId, body);
     this.sessions.update(sessionId, (e) => {
       e.lastSendAt = this.deps.clock.now();
       if (done) e.doneAt = this.deps.clock.now();
@@ -733,8 +761,8 @@ export class Daemon {
         this.deps.log.warn(`a send listener failed: ${(error as Error).message}`);
       }
     }
-    // The first idle reading says whether the post went out or is held.
-    if (posted.held) await this.outbox.checked();
+    // The first idle reading says whether the post went out or is held. The Notification hook doesn't wait.
+    if (posted.held && !prompt) await this.outbox.checked();
     const held = this.outbox.anyHeld(posted.entries);
     return { queued: posted.pieces, online: this.online(), held, ...(held ? { awayMinutes: this.awayMinutes() } : {}) };
   }

@@ -7,8 +7,9 @@ export const NEEDS_YOU = new Set(["permission_prompt", "elicitation_dialog"]);
 export const NOTIFY_TIMEOUT_MS = 2000;
 
 /**
- * `sk-discord hook notification`: post a permission prompt or an input dialog in the session's channel. Other
- * notifications (idle, sign-in) post nothing. Prints nothing.
+ * `sk-discord hook notification`: post a permission prompt or an input dialog in the session's channel. While
+ * the user is at the computer it waits, and goes out the first time they're away, unless it's answered at the
+ * keyboard first. Other notifications (idle, sign-in) post nothing. Prints nothing.
  */
 export async function notificationHook(deps: HookDeps): Promise<number> {
   const input = parseHookInput(await deps.readStdin());
@@ -24,6 +25,8 @@ export async function notificationHook(deps: HookDeps): Promise<number> {
         op: "send",
         sessionId: input.session_id,
         text: message,
+        prompt: true,
+        transcriptPath: stringField(input, "transcript_path"),
         cwd: stringField(input, "cwd") ?? "",
         entrypoint: deps.env.CLAUDE_CODE_ENTRYPOINT ?? null,
       },
