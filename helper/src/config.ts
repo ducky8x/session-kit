@@ -84,6 +84,19 @@ export function batteryPollMinutes(config: Config): number {
   return Math.max(1, value);
 }
 
+/** How long the user goes without touching the keyboard or mouse before posts go out, unless `config.json` says otherwise. */
+export const DEFAULT_AWAY_MINUTES = 5;
+
+/**
+ * `awayMinutes` from `config.json`: minutes without keyboard or mouse input after which the user counts as away
+ * and held posts go out, at least 1. A value that isn't a positive number is ignored and the default, 5, is used.
+ */
+export function awayMinutes(config: Config): number {
+  const value = config.awayMinutes;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return DEFAULT_AWAY_MINUTES;
+  return Math.max(1, value);
+}
+
 export function saveConfig(paths: Paths, config: Config): void {
   ensurePrivateDir(paths.dir);
   writeFileAtomic(paths.config, `${JSON.stringify(config, null, 2)}\n`);
