@@ -13,7 +13,6 @@ import {
   typedByUser,
 } from "../src/questions.ts";
 import { wakePrompt } from "../src/wake.ts";
-import { OWNER_ID } from "./fakes/fake-rest.ts";
 import { inboundKit } from "./helpers/inbound-kit.ts";
 import { tmpDir } from "./helpers/tmp.ts";
 import { waitFor } from "./helpers/wait.ts";
@@ -262,7 +261,7 @@ describe("telling a keyboard answer from a dialog that closed unanswered", () =>
 });
 
 describe("question timing", () => {
-  test("posted with a ping at 2:00, not at 1:59", async () => {
+  test("posted at 2:00, not at 1:59", async () => {
     const k = await asked();
     await k.clock.advance(2 * MINUTE - 1000);
     await k.settle();
@@ -271,8 +270,8 @@ describe("question timing", () => {
     await k.settle();
     const posted = k.rest.posted(k.channelId());
     expect(posted).toHaveLength(1);
-    expect(posted[0]!.content.startsWith(`<@${OWNER_ID}> This session is waiting for an answer:`)).toBe(true);
-    expect(posted[0]!.allowed_mentions).toEqual({ parse: [], users: [OWNER_ID] });
+    expect(posted[0]!.content.startsWith("This session is waiting for an answer:")).toBe(true);
+    expect(posted[0]!.allowed_mentions).toEqual({ parse: [] });
   });
 
   test("a session whose chat has no channel yet gets one for its question at 2:00", async () => {
@@ -287,7 +286,7 @@ describe("question timing", () => {
     expect(channelId).not.toBeNull();
     const posted = k.rest.posted(channelId!);
     expect(posted).toHaveLength(1);
-    expect(posted[0]!.content.startsWith(`<@${OWNER_ID}> This session is waiting for an answer:`)).toBe(true);
+    expect(posted[0]!.content.startsWith("This session is waiting for an answer:")).toBe(true);
   });
 
   test("a keyboard answer at 1:30 posts nothing, ever", async () => {
@@ -464,7 +463,7 @@ describe("question timing", () => {
     await waitFor(() => events.length === 1);
     expect(events[0]).toEqual({ type: "reminder", id: expect.any(String) });
     expect(k.replies()).toHaveLength(2);
-    expect(k.rest.posted(k.channelId())[1]!.content.startsWith(`<@${OWNER_ID}> Reminder:`)).toBe(true);
+    expect(k.rest.posted(k.channelId())[1]!.content.startsWith("Reminder:")).toBe(true);
 
     await k.attached();
     await k.clock.advance(30 * MINUTE);

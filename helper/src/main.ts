@@ -107,7 +107,7 @@ function setupDeps(deps: CliDeps): SetupDeps {
 
 export const USAGE = `sk-discord: the Discord helper for session-kit
 
-  sk-discord send --session <id> [--ping] [--done] "<text>"
+  sk-discord send --session <id> [--done] "<text>"
                                         post in the session's channel ("-" reads stdin)
   sk-discord listen --session <id>      wait for one event for the session and print it as JSON
   sk-discord status [--json]            show what the helper is doing, and the fix when something is wrong

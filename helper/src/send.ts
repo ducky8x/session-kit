@@ -9,25 +9,24 @@ export const OFF_MESSAGE = "Discord is off (/discord on to turn it on)";
 /** Registering an unknown session first can take a moment; the post itself is only queued. */
 export const SEND_TIMEOUT_MS = 10_000;
 
-export const SEND_USAGE = 'usage: sk-discord send --session <id> [--ping] [--done] "<text>"   ("-" reads the text from stdin)';
+export const SEND_USAGE = 'usage: sk-discord send --session <id> [--done] "<text>"   ("-" reads the text from stdin)';
 
 export interface SendArgs {
   sessionId: string;
   /** The text, or "-" for stdin. */
   text: string;
-  ping: boolean;
   done: boolean;
 }
 
 /** Read `send`'s arguments. A string is an error message. */
 export function parseSendArgs(args: readonly string[]): SendArgs | string {
   let sessionId: string | null = null;
-  let ping = false;
   let done = false;
   const words: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
-    if (arg === "--ping") ping = true;
+    // Posts never @mention the user. `--ping` is still accepted, so older sessions and scripts keep working.
+    if (arg === "--ping") continue;
     else if (arg === "--done") done = true;
     else if (arg === "--session") sessionId = args[++i] ?? null;
     else if (arg.startsWith("--session=")) sessionId = arg.slice("--session=".length);
@@ -40,7 +39,7 @@ export function parseSendArgs(args: readonly string[]): SendArgs | string {
   }
   if (!sessionId) return "--session <id> is required.";
   if (words.length !== 1) return "Give the text as one argument (quote it), or - to read it from stdin.";
-  return { sessionId, text: words[0]!, ping, done };
+  return { sessionId, text: words[0]!, done };
 }
 
 export interface SendDeps {
@@ -53,7 +52,7 @@ export interface SendDeps {
 }
 
 /**
- * `sk-discord send --session <id> [--ping] [--done] "<text>"`: post in the session's channel.
+ * `sk-discord send --session <id> [--done] "<text>"`: post in the session's channel.
  * Exit 0 posted or queued, 1 error, 2 helper not running, 3 Discord off, 4 session not linked.
  */
 export async function sendCommand(args: readonly string[], deps: SendDeps): Promise<number> {
@@ -74,7 +73,6 @@ export async function sendCommand(args: readonly string[], deps: SendDeps): Prom
         op: "send",
         sessionId: parsed.sessionId,
         text,
-        ping: parsed.ping,
         done: parsed.done,
         cwd: deps.cwd,
         entrypoint: deps.env.CLAUDE_CODE_ENTRYPOINT ?? null,

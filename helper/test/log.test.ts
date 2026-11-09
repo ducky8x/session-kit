@@ -90,8 +90,8 @@ describe("what reaches the log from posting", () => {
       fake.failNext({ path: /messages$/, status: 403, body: { code: 50001, message: `Missing Access: ${words}` } });
       fake.failNext({ path: /messages$/, status: 500, body: { message: words } });
       outbox.enqueue([
-        { target: "s1", content: words, allowedMentions: { parse: [] } },
-        { target: "s1", content: `${words} again`, allowedMentions: { parse: [] } },
+        { target: "s1", content: words },
+        { target: "s1", content: `${words} again` },
       ]);
       outbox.setOnline(true);
       await waitFor(() => clock.pending === 1);

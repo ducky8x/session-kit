@@ -67,7 +67,7 @@ async function setup(o: { file?: string; clock?: FakeClock; fetch?: typeof fetch
 }
 
 function post(target: string, content: string): Omit<OutboxEntry, "id" | "at"> {
-  return { target, content, allowedMentions: { parse: [] } };
+  return { target, content };
 }
 
 describe("Outbox", () => {
@@ -216,10 +216,30 @@ describe("Outbox", () => {
   test("an unreadable line in the file is skipped", async () => {
     const file = `${tmpDir()}/discord/outbox.jsonl`;
     mkdirSync(dirname(file), { recursive: true });
-    const good: OutboxEntry = { id: "a1", at: Date.now(), target: "s1", content: "good", allowedMentions: { parse: [] } };
+    const good: OutboxEntry = { id: "a1", at: Date.now(), target: "s1", content: "good" };
     writeFileSync(file, `{ broken\n${JSON.stringify(good)}\n`);
     const kit = await setup({ file, clock: new FakeClock(Date.now()) });
     expect(kit.outbox.size).toBe(1);
     expect(existsSync(file)).toBe(true);
+  });
+
+  test("an entry an older helper queued with an @mention loses the mention, and goes out with parse: []", async () => {
+    const file = `${tmpDir()}/discord/outbox.jsonl`;
+    mkdirSync(dirname(file), { recursive: true });
+    const now = Date.now();
+    const old = [
+      { id: "a1", at: now, target: "s1", content: "<@123456789012345678> Claude needs your permission", allowedMentions: { parse: [], users: ["123456789012345678"] } },
+      { id: "a2", at: now, target: "s1", content: "plain, with <@42> typed by the session", allowedMentions: { parse: [] } },
+    ];
+    writeFileSync(file, old.map((e) => `${JSON.stringify(e)}\n`).join(""));
+    const kit = await setup({ file, clock: new FakeClock(now) });
+    const channel = kit.fake.addChannel({ name: "work-cli" });
+    kit.channels.set("s1", channel.id);
+    kit.outbox.setOnline(true);
+    await kit.outbox.idle();
+    expect(kit.fake.posted(channel.id).map((m) => [m.content, m.allowed_mentions])).toEqual([
+      ["Claude needs your permission", { parse: [] }],
+      ["plain, with <@42> typed by the session", { parse: [] }],
+    ]);
   });
 });

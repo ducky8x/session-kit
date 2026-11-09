@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { OWNER_ID } from "./fakes/fake-rest.ts";
 import { SID, daemonKit } from "./helpers/daemon-kit.ts";
 import { waitFor } from "./helpers/wait.ts";
 
@@ -8,7 +7,7 @@ function hookInput(type: string, message = "Claude needs your permission to use 
 }
 
 describe("hook notification", () => {
-  test("permission_prompt and elicitation_dialog post with a ping", async () => {
+  test("permission_prompt and elicitation_dialog post their message, mentioning nobody", async () => {
     const k = await daemonKit();
     await k.connected();
     await k.startChat(SID);
@@ -22,8 +21,8 @@ describe("hook notification", () => {
     }
     await waitFor(() => k.rest.posted(channelId).length === 2);
     expect(k.rest.posted(channelId).map((m) => [m.content, m.allowed_mentions])).toEqual([
-      [`<@${OWNER_ID}> Claude needs your permission to use Bash`, { parse: [], users: [OWNER_ID] }],
-      [`<@${OWNER_ID}> Claude is asking for input`, { parse: [], users: [OWNER_ID] }],
+      ["Claude needs your permission to use Bash", { parse: [] }],
+      ["Claude is asking for input", { parse: [] }],
     ]);
   });
 
@@ -35,7 +34,7 @@ describe("hook notification", () => {
     await waitFor(() => k.daemon.sessions.get(SID)?.channelId != null);
     const channelId = k.daemon.sessions.get(SID)!.channelId!;
     await waitFor(() => k.rest.posted(channelId).length === 1);
-    expect(k.rest.posted(channelId)[0]!.content).toBe(`<@${OWNER_ID}> Claude needs your permission to use Bash`);
+    expect(k.rest.posted(channelId)[0]!.content).toBe("Claude needs your permission to use Bash");
   });
 
   test("idle_prompt and auth_success post nothing", async () => {

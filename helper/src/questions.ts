@@ -3,6 +3,7 @@ import type { Daemon, DiscordMessage } from "./daemon.ts";
 import type { DefaultAnswer, ListenerEvent, ParsedAnswer } from "./events.ts";
 import type { Inbound } from "./inbound.ts";
 import { readTailLines } from "./names.ts";
+import { NO_MENTIONS } from "./outbound.ts";
 import { RequestError } from "./server.ts";
 import type { SessionEntry } from "./state.ts";
 import { WAKE_PROMPT_START } from "./wake.ts";
@@ -269,8 +270,8 @@ function describeAnswer(event: Extract<ListenerEvent, { type: "answer" }>): stri
 }
 
 /**
- * Questions asked with AskUserQuestion, on Discord: recorded by the pre-ask hook; posted with a ping after
- * 2 minutes without a keyboard answer; a reminder at 30; the defaults and an `autonomous` event at 60; then
+ * Questions asked with AskUserQuestion, on Discord: recorded by the pre-ask hook; posted after 2 minutes
+ * without a keyboard answer; a reminder at 30; the defaults and an `autonomous` event at 60; then
  * a check-in every hour until `send --done`. The first answer wins: a Discord reply becomes an `answer`
  * event, and a keyboard answer edits the post to say so. A reply after the defaults were taken is `late`.
  */
@@ -453,7 +454,7 @@ export class Questions {
     this.save(sessionId, (r) => {
       r.postedAt = this.daemon.deps.clock.now();
     });
-    this.daemon.post(sessionId, formatQuestions(q.items), { ping: true, tag: `question:${q.id}` });
+    this.daemon.post(sessionId, formatQuestions(q.items), { tag: `question:${q.id}` });
   }
 
   private remind(sessionId: string): void {
@@ -463,7 +464,7 @@ export class Questions {
     this.save(sessionId, (r) => {
       r.remindedAt = this.daemon.deps.clock.now();
     });
-    this.daemon.post(sessionId, REMINDER_POST, { ping: true });
+    this.daemon.post(sessionId, REMINDER_POST);
     void this.inbound.route(sessionId, { type: "reminder", id: q.id }, {});
   }
 
@@ -536,7 +537,7 @@ export class Questions {
     for (const post of posts) {
       try {
         await this.daemon.rest.request("PATCH", `/channels/${post.channelId}/messages/${post.messageId}`, {
-          body: { content: ANSWERED_AT_KEYBOARD, allowed_mentions: { parse: [] } },
+          body: { content: ANSWERED_AT_KEYBOARD, allowed_mentions: NO_MENTIONS },
         });
       } catch (error) {
         this.daemon.deps.log.warn(`could not mark a question post as answered: ${(error as Error).message}`);

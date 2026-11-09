@@ -153,7 +153,7 @@ describe("setup server", () => {
     expect(welcome).toHaveLength(1);
     expect(welcome[0]!.content).toContain(NOTIFICATION_REMINDER);
     expect(NOTIFICATION_REMINDER).toBe(
-      "Keep Discord notifications on. Set this server to All Messages (server name > Notification Settings) so every post reaches you; the bot @mentions you only when a session is waiting on you.",
+      "Keep Discord notifications on, and set this server to All Messages (server name > Notification Settings). The bot never @mentions you, so with any other setting its posts don't notify you.",
     );
     expect(welcome[0]!.content).toContain("Keep this server to yourself");
     expect(welcome[0]!.allowed_mentions).toEqual({ parse: [] });

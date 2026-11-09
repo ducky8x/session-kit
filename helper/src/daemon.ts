@@ -76,7 +76,6 @@ export interface PostedEvent {
 export interface SendEvent {
   sessionId: string;
   text: string;
-  ping: boolean;
   done: boolean;
 }
 
@@ -277,13 +276,13 @@ export class Daemon {
   }
 
   /**
-   * Queue a post for a session's channel (`target` is its session id) or for `#session-kit` (`control`):
-   * split, with an @mention of the owner when `ping` is set. `tag` comes back with each piece's
-   * `onPosted`. Returns how many messages it became.
+   * Queue a post for a session's channel (`target` is its session id) or for `#session-kit` (`control`),
+   * split to fit. It never @mentions anyone. `tag` comes back with each piece's `onPosted`. Returns how many
+   * messages it became.
    */
-  post(target: string, body: string, o: { ping?: boolean; tag?: string } = {}): number {
-    const pieces = buildPosts(body, { ping: o.ping ?? false, ownerId: this.config.ownerId });
-    this.outbox.enqueue(pieces.map((p) => ({ ...p, target, ...(o.tag === undefined ? {} : { tag: o.tag }) })));
+  post(target: string, body: string, o: { tag?: string } = {}): number {
+    const pieces = buildPosts(body);
+    this.outbox.enqueue(pieces.map((content) => ({ content, target, ...(o.tag === undefined ? {} : { tag: o.tag }) })));
     return pieces.length;
   }
 
@@ -609,16 +608,16 @@ export class Daemon {
     if (!(await this.adopt(sessionId, optionalText(req.entrypoint), optionalText(req.cwd)))) {
       throw new RequestError("not-linked", "This session has no Discord channel (only interactive sessions get one).");
     }
-    const ping = req.ping === true;
+    // `ping` from an older session or script is ignored: posts never @mention the user.
     const done = req.done === true;
-    const pieces = this.post(sessionId, body, { ping });
+    const pieces = this.post(sessionId, body);
     this.sessions.update(sessionId, (e) => {
       e.lastSendAt = this.deps.clock.now();
       if (done) e.doneAt = this.deps.clock.now();
     });
     for (const listener of this.sendListeners) {
       try {
-        listener({ sessionId, text: body, ping, done });
+        listener({ sessionId, text: body, done });
       } catch (error) {
         this.deps.log.warn(`a send listener failed: ${(error as Error).message}`);
       }

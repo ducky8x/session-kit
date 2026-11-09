@@ -5,30 +5,15 @@ import type { Logger } from "./log.ts";
 import { DISCORD_MAX_TEXT, splitMessage } from "./split.ts";
 import { readJsonLines, writeFileAtomic } from "./state.ts";
 
-/** What Discord's `allowed_mentions` gets: who a post may notify. */
-export interface AllowedMentions {
-  parse: string[];
-  users?: string[];
-}
-
-/** One Discord message's worth of a post: its text and who it may notify. */
-export interface PostPiece {
-  content: string;
-  allowedMentions: AllowedMentions;
-}
-
 /**
- * Turn a post into Discord messages: split to fit 2,000 characters, and with `ping`, an @mention of the owner
- * at the start of the first piece. Mentions in the text itself (@everyone, roles, users) never notify anyone:
- * `allowed_mentions` lists only the owner, and only on the piece that mentions them.
+ * What every post sends as `allowed_mentions`: nobody. The helper never @mentions the user, and mentions in the
+ * text itself (@everyone, @here, roles, users) notify no one.
  */
-export function buildPosts(text: string, o: { ping?: boolean; ownerId?: string | null } = {}): PostPiece[] {
-  const mention = o.ping && o.ownerId ? `<@${o.ownerId}> ` : "";
-  return splitMessage(text, DISCORD_MAX_TEXT - mention.length).map((chunk, i) =>
-    i === 0 && mention !== ""
-      ? { content: `${mention}${chunk}`, allowedMentions: { parse: [], users: [o.ownerId!] } }
-      : { content: chunk, allowedMentions: { parse: [] } },
-  );
+export const NO_MENTIONS = { parse: [] as string[] };
+
+/** Turn a post into Discord messages: split to fit 2,000 characters. */
+export function buildPosts(text: string): string[] {
+  return splitMessage(text, DISCORD_MAX_TEXT);
 }
 
 /** One post waiting for Discord, one line of `outbox.jsonl`. */
@@ -39,7 +24,6 @@ export interface OutboxEntry {
   /** A session id, or `control` for `#session-kit`. */
   target: string;
   content: string;
-  allowedMentions: AllowedMentions;
   /** A label the poster picks, handed back when the post goes out (to find the message again, say to edit it). */
   tag?: string;
   /** The post already met a deleted channel once; a second time drops it. */
@@ -90,7 +74,7 @@ export class Outbox {
   private closed = false;
 
   constructor(private readonly d: OutboxDeps) {
-    this.queue = readJsonLines(d.file).filter(isEntry);
+    this.queue = readJsonLines(d.file).filter(isEntry).map(withoutMention);
   }
 
   get size(): number {
@@ -160,7 +144,6 @@ export class Outbox {
         at: this.d.clock.now(),
         target: "control",
         content: droppedNotice(stale.length, Math.min(...times), Math.max(...times)),
-        allowedMentions: { parse: [] },
       });
     }
     this.save();
@@ -185,7 +168,7 @@ export class Outbox {
       }
       try {
         const message = await this.d.rest.request<{ id: string }>("POST", `/channels/${channelId}/messages`, {
-          body: { content: entry.content, allowed_mentions: entry.allowedMentions },
+          body: { content: entry.content, allowed_mentions: NO_MENTIONS },
         });
         this.drop(entry);
         this.failures = 0;
@@ -232,12 +215,15 @@ export class Outbox {
 function isEntry(value: unknown): value is OutboxEntry {
   if (!value || typeof value !== "object") return false;
   const e = value as Record<string, unknown>;
-  return (
-    typeof e.id === "string" &&
-    typeof e.at === "number" &&
-    typeof e.target === "string" &&
-    typeof e.content === "string" &&
-    !!e.allowedMentions &&
-    typeof e.allowedMentions === "object"
-  );
+  return typeof e.id === "string" && typeof e.at === "number" && typeof e.target === "string" && typeof e.content === "string";
+}
+
+/**
+ * An entry queued by an older helper may start with an @mention of the user, marked by `allowedMentions.users`.
+ * The mention comes off, and so does the field.
+ */
+function withoutMention(entry: OutboxEntry): OutboxEntry {
+  const { allowedMentions, ...rest } = entry as OutboxEntry & { allowedMentions?: { users?: unknown } };
+  const pinged = Array.isArray(allowedMentions?.users) && allowedMentions.users.length > 0;
+  return pinged ? { ...rest, content: rest.content.replace(/^<@!?\d+>\s*/, "") } : rest;
 }
