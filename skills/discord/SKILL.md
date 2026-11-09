@@ -98,7 +98,7 @@ When the session-start hook prints a `Discord:` line with a listener command, st
 - The listener waits for one event, prints it as one JSON line and exits, so an idle session costs nothing. When its output arrives, handle the event, then start the listener again.
 - Start it again after every event except `disabled`, `unlinked` and `replaced`. Keep exactly one running: after a summary of the chat, the one you started earlier may still be running, so check your background tasks first. If two do run, the helper keeps the newer one and ends the older one with `replaced`.
 - Don't poll. Events come to you.
-- On battery power the helper keeps no live connection to Discord and checks for new messages every 5 minutes, so a message the user types in Discord can take up to 5 minutes to reach you. Posts with `send` still go out at once.
+- On battery power the helper keeps no live connection to Discord and checks for new messages every 5 minutes, so a message the user types in Discord can take up to 5 minutes to reach you. Posts with `send` don't wait for those checks.
 - Events that arrived while nothing was listening come with `"queued": true`. Handle them in order, like any other event.
 
 ### When to post
@@ -107,15 +107,16 @@ Post with `~/.claude/session-kit/bin/sk-discord send --session <id> "<text>"`. F
 
 - Post when a task finishes, when something fails or you're stuck, and when a long run ends. Never post frequent progress updates.
 - Add `--done` to the last post of a finished task. That stops the hourly check-ins.
-- Add `--ping` only when you're blocked until the user answers. The hooks already @mention the user for permission prompts, input dialogs and questions left unanswered at the keyboard, so don't ping for those.
+- The helper holds posts while the user is at the computer and sends them once they've been away 5 minutes. A post made while they're there is dropped once they use the computer again, since they can see the session themselves. `send` then prints a line starting `Held:` and exits 0. That isn't an error: don't post it again, and tell the user at the keyboard as usual.
+- If the user wrote in this session's channel in the last 30 minutes, they're talking to you there, and posts go out at once.
 - Lead with the result and keep it short. The helper splits posts over 2,000 characters, so send the whole text; nothing is cut.
 - Never post tokens, passwords, keys or file contents. Code only as a short snippet.
 
-Exit codes from `send`: 0 posted or queued; 1 an error; 2 the helper isn't running; 3 Discord is off; 4 the session isn't linked. On 3, stop posting and listening. On 1, 2 or 4, tell the user at the keyboard in one line, once, and carry on with the work.
+Exit codes from `send`: 0 posted, queued or held; 1 an error; 2 the helper isn't running; 3 Discord is off; 4 the session isn't linked. On 3, stop posting and listening. On 1, 2 or 4, tell the user at the keyboard in one line, once, and carry on with the work.
 
 ### Questions
 
-Questions reach Discord on their own: a hook records each `AskUserQuestion`, and if nobody answers at the keyboard within 2 minutes, the helper posts it with an @mention. Don't post questions yourself, and ask at the keyboard as usual.
+Questions reach Discord on their own: a hook records each `AskUserQuestion`, and the helper posts it once the user has been away from the computer for 5 minutes, unless it was answered at the keyboard first. Don't post questions yourself, and ask at the keyboard as usual.
 
 While the dialog is open, a Discord answer waits until it closes. If the dialog closes unanswered, the question stays open on Discord. For that question, this replaces the start skill's rule that an unanswered question means working autonomously and asking nothing more: keep working on whatever doesn't need the answer, end the turn if nothing is left, and wait for an `answer` or `autonomous` event.
 
@@ -130,9 +131,9 @@ Each line from the listener is JSON with a `type`:
 - `pause`: the helper replied "Pausing after this step." Finish the step you're in, don't begin the next one, say in one line (keyboard and `send`) that you're paused, and wait. Carry on when `resume` arrives or the user asks for something new.
 - `resume`: the helper replied "Resuming." Pick up where you paused, and say so in one line.
 - `answer`: the user answered an open question in Discord. `answers` lists `{number, letter, option}`; `raw` is what they wrote, passed through when it isn't in the `1a 2b` form, so read it yourself; `missing` lists the questions they skipped, so take that question's default or decide. An `answer` wins over the keyboard dialog: when the dialog later returns a result, ignore it. With `"late": true`, it came after the defaults were taken at the hour mark: adjust only if it still matters, and say what changed.
-- `reminder`: 30 minutes without an answer; the helper pinged the user again. Nothing to do: keep working on what doesn't need the answer.
-- `autonomous`: an hour without an answer. The event lists the defaults the helper took. Use them, turn on autonomous mode (invoke `session-kit:autonomous-mode`, unless the state file shows it's already on), and keep going. List those defaults under "Decisions I made".
-- `checkin`: the helper posted its hourly check-in. These continue until a post with `--done`. You may add one short status line with `send`; nothing else is needed.
+- `reminder`: 30 minutes after the question reached Discord, still no answer; the helper reminded the user there. Nothing to do: keep working on what doesn't need the answer.
+- `autonomous`: an hour after the question reached Discord, still no answer. The event lists the defaults the helper took. Use them, turn on autonomous mode (invoke `session-kit:autonomous-mode`, unless the state file shows it's already on), and keep going. List those defaults under "Decisions I made".
+- `checkin`: the helper posted its hourly check-in. It skips the ones that come due while the user is at the computer. These continue until a post with `--done`. You may add one short status line with `send`; nothing else is needed.
 - `disabled`: Discord was turned off. Stop listening and posting, don't start the listener again, and say so in one line at the keyboard.
 - `unlinked`: this session's channel is gone (deleted by hand, or removed after a month without messages). Don't start the listener again now. A later post creates a new channel; start the listener again after that post.
 - `replaced`: a newer listener for this session took over, for example one started after a summary of the chat or after `/clear`. Don't start the listener again; the newer one is already running.

@@ -28,6 +28,9 @@ export function couldNotWake(reason: string): string {
 
 const CONTROL_WORDS = new Set(["stop", "pause", "resume"]);
 
+/** Every post here answers something the owner typed in Discord, so it goes out even while they're at the computer. */
+const REPLY = { ungated: true } as const;
+
 /** Discord message types that carry what a person typed: a plain message and a reply. */
 const USER_MESSAGE_TYPES = new Set([0, 19]);
 
@@ -85,24 +88,24 @@ export class Inbound {
     const target = control ? "control" : session!.sessionId;
     const text = (message.content ?? "").trim();
     if (Array.isArray(message.attachments) && message.attachments.length > 0) {
-      this.daemon.post(target, REPLIES.attachments);
+      this.daemon.post(target, REPLIES.attachments, REPLY);
     }
     if (text === "") return;
     const word = text.toLowerCase();
 
     if (control) {
-      this.daemon.post("control", word === "status" ? await this.statusOfAll() : REPLIES.controlHint);
+      this.daemon.post("control", word === "status" ? await this.statusOfAll() : REPLIES.controlHint, REPLY);
       return;
     }
     const s = session!;
     if (word === "status") {
-      this.daemon.post(s.sessionId, await this.statusOf(s));
+      this.daemon.post(s.sessionId, await this.statusOf(s), REPLY);
       return;
     }
     if (CONTROL_WORDS.has(word)) {
       const result = await this.route(s.sessionId, { type: word as "stop" | "pause" | "resume" }, {});
       const extra = result.kind === "queued" && result.dropped > 0 ? ` ${REPLIES.inboxFull}` : "";
-      this.daemon.post(s.sessionId, `${REPLIES[word as "stop" | "pause" | "resume"]}${extra}`);
+      this.daemon.post(s.sessionId, `${REPLIES[word as "stop" | "pause" | "resume"]}${extra}`, REPLY);
       return;
     }
     for (const interceptor of this.interceptors) {
@@ -121,7 +124,7 @@ export class Inbound {
     else if (result.why === "closed") lines.push(session.surface === "vs" ? REPLIES.closedVs : REPLIES.closedDesktop);
     else if (result.why === "waking") lines.push(REPLIES.waking);
     if (result.dropped > 0) lines.push(REPLIES.inboxFull);
-    if (lines.length > 0) this.daemon.post(session.sessionId, lines.join(" "));
+    if (lines.length > 0) this.daemon.post(session.sessionId, lines.join(" "), REPLY);
   }
 
   private queue(sessionId: string, event: ListenerEvent, why: "between-listens" | "open" | "closed" | "waking"): RouteResult {
@@ -207,7 +210,7 @@ export class Inbound {
         reply = couldNotWake(outcome.reason);
         break;
     }
-    this.daemon.post(session.sessionId, reply);
+    this.daemon.post(session.sessionId, reply, REPLY);
     return outcome;
   }
 

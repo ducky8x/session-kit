@@ -2,19 +2,20 @@ import { HelperError, NOT_RUNNING, type CallHelper } from "./client.ts";
 import { type Config, configExists, loadConfig, updateConfig } from "./config.ts";
 import { RestClient, RestError } from "./discord/rest.ts";
 import { installLaunchAgent } from "./launchagent.ts";
+import { NO_MENTIONS } from "./outbound.ts";
 import type { Clock } from "./clock.ts";
 import { silentLogger } from "./log.ts";
 import type { Paths } from "./paths.ts";
 import type { ProcessRunner } from "./process.ts";
 import { type Keychain, isPlausibleToken } from "./secrets.ts";
-import { HELPER_DOWN, STATUS_PROBLEMS, type StatusCode, batteryLine } from "./status.ts";
+import { HELPER_DOWN, STATUS_PROBLEMS, type StatusCode, batteryLine, heldStatusLine } from "./status.ts";
 import { installed, readUpdateFailure } from "./update.ts";
 
 /** Manage Channels (16), View Channels (1024), Send Messages (2048), Read Message History (65536). */
 export const INVITE_PERMISSIONS = 16 + 1024 + 2048 + 65536;
 
 export const NOTIFICATION_REMINDER =
-  "Keep Discord notifications on. Set this server to All Messages (server name > Notification Settings) so every post reaches you; the bot @mentions you only when a session is waiting on you.";
+  "Keep Discord notifications on, and set this server to All Messages (server name > Notification Settings). The bot never @mentions you, so with any other setting its posts don't notify you.";
 
 export const WELCOME = [
   "session-kit is connected. Every Claude Code session gets its own channel here, under Desktop, VS Code or CLI. A channel with no messages for a week moves to Archive, and after a month it's deleted.",
@@ -236,7 +237,7 @@ async function setupServer(args: readonly string[], d: SetupDeps): Promise<numbe
       c.categories = { ...c.categories, ...categories };
     });
     if (fresh) {
-      await api.request("POST", `/channels/${control.id}/messages`, { body: { content: WELCOME, allowed_mentions: { parse: [] } } });
+      await api.request("POST", `/channels/${control.id}/messages`, { body: { content: WELCOME, allowed_mentions: NO_MENTIONS } });
     }
     d.out(`Server: ${g.name} (${g.id})\n`);
     d.out(`Owner: ${display} (@${username}, id ${ownerId}). Only this account's messages reach sessions; confirm it is yours.\n`);
@@ -359,6 +360,7 @@ export async function statusCommand(args: readonly string[], d: SetupDeps): Prom
   if (fields.running === false) lines.push("The helper isn't running yet.");
   else lines.push(`Sessions: ${fields.sessions} (${fields.linked} with a channel, ${fields.archived} archived)`);
   if (fields.outbox > 0) lines.push(`Posts waiting: ${fields.outbox}`);
+  if (fields.held > 0 && typeof fields.awayMinutes === "number") lines.push(heldStatusLine(fields.held, fields.awayMinutes));
   d.out(`${lines.join("\n")}\n`);
   return 0;
 }

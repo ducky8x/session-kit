@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import {
+  DEFAULT_AWAY_MINUTES,
   DEFAULT_BATTERY_POLL_MINUTES,
+  awayMinutes,
   batteryPollMinutes,
   configExists,
   defaultConfig,
@@ -81,5 +83,31 @@ describe("config.json", () => {
       c.enabled = false;
     });
     expect(JSON.parse(readFileSync(paths.config, "utf8")).batteryPollMinutes).toBe("often");
+  });
+
+  test("awayMinutes: 5 by default, at least 1, and anything that isn't a positive number is ignored", () => {
+    expect(DEFAULT_AWAY_MINUTES).toBe(5);
+    const minutes = (value: unknown) => awayMinutes({ ...defaultConfig(), awayMinutes: value });
+    expect(awayMinutes(defaultConfig())).toBe(5);
+    expect(minutes(10)).toBe(10);
+    expect(minutes(1)).toBe(1);
+    expect(minutes(2.5)).toBe(2.5);
+    expect(minutes(0.25)).toBe(1);
+    for (const bad of [0, -3, Number.NaN, Number.POSITIVE_INFINITY, "10", null, true, [5], { minutes: 5 }]) {
+      expect(minutes(bad)).toBe(5);
+    }
+  });
+
+  test("awayMinutes is read from config.json and kept as written", () => {
+    const paths = pathsFor(tmpDir());
+    mkdirSync(paths.dir, { recursive: true });
+    writeFileSync(paths.config, JSON.stringify({ enabled: true, awayMinutes: 15 }));
+    expect(awayMinutes(loadConfig(paths))).toBe(15);
+    writeFileSync(paths.config, JSON.stringify({ enabled: true, awayMinutes: "soon" }));
+    expect(awayMinutes(loadConfig(paths))).toBe(5);
+    updateConfig(paths, (c) => {
+      c.enabled = false;
+    });
+    expect(JSON.parse(readFileSync(paths.config, "utf8")).awayMinutes).toBe("soon");
   });
 });

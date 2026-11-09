@@ -82,6 +82,8 @@ export function installSessionFeatures(daemon: Daemon): SessionFeatures {
       if (!daemon.currentConfig().enabled) return {};
       // A turn ended, so the session's chat is under way: it gets its channel now if it has none.
       daemon.channels.activate(sessionId);
+      // A turn can't end while a permission prompt waits, so one still held was answered.
+      daemon.settlePrompts(sessionId);
       if (hub.isListening(sessionId)) return {};
       const reason = stopHookReason(daemon.sessions.takeInbox(sessionId));
       return reason === null ? {} : { decision: "block", reason };

@@ -109,6 +109,11 @@ export interface SessionEntry {
   /** When the session last posted with `send`. */
   lastSendAt: number | null;
   /**
+   * When the owner last wrote in the session's channel. For 30 minutes after that the user is having a
+   * conversation there, and the session's posts go out even while they're at the computer.
+   */
+  ownerMessageAt: number | null;
+  /**
    * The Claude Code process the session last started in (`CLAUDE_PID` in the hooks' environment), or null when
    * the hook didn't say. A new session id in the same process (`/clear`) carries on the same chat.
    */
@@ -143,6 +148,7 @@ export function newSession(o: {
     wantsChannel: false,
     doneAt: null,
     lastSendAt: null,
+    ownerMessageAt: null,
     claudePid: null,
     movedTo: null,
   };
@@ -182,6 +188,7 @@ function readEntry(sessionId: string, raw: unknown): SessionEntry | null {
     wantsChannel: r.wantsChannel === true,
     doneAt: num(r.doneAt),
     lastSendAt: num(r.lastSendAt),
+    ownerMessageAt: num(r.ownerMessageAt),
     claudePid: num(r.claudePid),
     movedTo: str(r.movedTo),
   };

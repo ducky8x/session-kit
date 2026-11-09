@@ -6,18 +6,21 @@ import { type Clock, realClock } from "./clock.ts";
  * the file logger also blanks out anything shaped like a bot token.
  */
 export interface Logger {
+  /** Routine detail, such as a held post that was dropped. */
+  debug(message: string): void;
   info(message: string): void;
   warn(message: string): void;
   error(message: string): void;
 }
 
-export const silentLogger: Logger = { info() {}, warn() {}, error() {} };
+export const silentLogger: Logger = { debug() {}, info() {}, warn() {}, error() {} };
 
 /** A logger that keeps lines in memory (for tests). */
 export function memoryLogger(): Logger & { lines: string[] } {
   const lines: string[] = [];
   return {
     lines,
+    debug: (m) => void lines.push(`debug ${m}`),
     info: (m) => void lines.push(`info ${m}`),
     warn: (m) => void lines.push(`warn ${m}`),
     error: (m) => void lines.push(`error ${m}`),
@@ -47,6 +50,10 @@ export class FileLogger implements Logger {
   /** Never write this value (the token, once it is read). */
   addSecret(secret: string): void {
     if (secret.length >= 8) this.secrets.add(secret);
+  }
+
+  debug(message: string): void {
+    this.write("debug", message);
   }
 
   info(message: string): void {

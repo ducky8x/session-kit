@@ -14,11 +14,12 @@ describe("FileLogger", () => {
   test("writes timestamped lines to a user-only file", () => {
     const file = `${tmpDir()}/helper.log`;
     const log = new FileLogger(file, { clock: new FakeClock(Date.UTC(2026, 10, 4, 12, 0, 0)) });
+    log.debug("details");
     log.info("started");
     log.warn("careful");
     log.error("broken");
     expect(readFileSync(file, "utf8")).toBe(
-      "2026-11-04T12:00:00.000Z info started\n2026-11-04T12:00:00.000Z warn careful\n2026-11-04T12:00:00.000Z error broken\n",
+      "2026-11-04T12:00:00.000Z debug details\n2026-11-04T12:00:00.000Z info started\n2026-11-04T12:00:00.000Z warn careful\n2026-11-04T12:00:00.000Z error broken\n",
     );
     expect(statSync(file).mode & 0o777).toBe(0o600);
   });
@@ -89,8 +90,8 @@ describe("what reaches the log from posting", () => {
       fake.failNext({ path: /messages$/, status: 403, body: { code: 50001, message: `Missing Access: ${words}` } });
       fake.failNext({ path: /messages$/, status: 500, body: { message: words } });
       outbox.enqueue([
-        { target: "s1", content: words, allowedMentions: { parse: [] } },
-        { target: "s1", content: `${words} again`, allowedMentions: { parse: [] } },
+        { target: "s1", content: words },
+        { target: "s1", content: `${words} again` },
       ]);
       outbox.setOnline(true);
       await waitFor(() => clock.pending === 1);

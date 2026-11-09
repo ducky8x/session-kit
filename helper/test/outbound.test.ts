@@ -4,6 +4,7 @@ import { SEND_EXIT, parseSendArgs } from "../src/send.ts";
 import { HELPER_DOWN } from "../src/status.ts";
 import { OWNER_ID } from "./fakes/fake-rest.ts";
 import { SID, daemonKit } from "./helpers/daemon-kit.ts";
+import { inboundKit } from "./helpers/inbound-kit.ts";
 import { waitFor } from "./helpers/wait.ts";
 
 async function connectedWithSession() {
@@ -15,34 +16,30 @@ async function connectedWithSession() {
 }
 
 describe("buildPosts", () => {
-  test("a ping puts the owner's mention first and allows only the owner", () => {
-    expect(buildPosts("Waiting on you", { ping: true, ownerId: "42" })).toEqual([
-      { content: "<@42> Waiting on you", allowedMentions: { parse: [], users: ["42"] } },
-    ]);
-    expect(buildPosts("No ping", { ownerId: "42" })).toEqual([{ content: "No ping", allowedMentions: { parse: [] } }]);
+  test("a post is its text, with no mention added", () => {
+    expect(buildPosts("Waiting on you")).toEqual(["Waiting on you"]);
   });
 
-  test("a long pinged post keeps every piece within 2,000 characters and mentions once", () => {
-    const pieces = buildPosts("word ".repeat(900), { ping: true, ownerId: "123456789012345678" });
+  test("a long post keeps every piece within 2,000 characters", () => {
+    const pieces = buildPosts("word ".repeat(900));
     expect(pieces.length).toBeGreaterThan(1);
-    for (const piece of pieces) expect(piece.content.length).toBeLessThanOrEqual(2000);
-    expect(pieces.filter((p) => p.content.includes("<@123456789012345678>"))).toHaveLength(1);
-    expect(pieces.slice(1).every((p) => p.allowedMentions.users === undefined)).toBe(true);
+    for (const piece of pieces) expect(piece.length).toBeLessThanOrEqual(2000);
+    expect(pieces.join(" ").split(/\s+/).filter(Boolean)).toHaveLength(900);
   });
 });
 
 describe("parseSendArgs", () => {
   test("reads the session, the flags and the text", () => {
-    expect(parseSendArgs(["--session", SID, "--ping", "--done", "hi there"])).toEqual({
-      sessionId: SID,
-      text: "hi there",
-      ping: true,
-      done: true,
-    });
-    expect(parseSendArgs([`--session=${SID}`, "-"])).toMatchObject({ text: "-", ping: false, done: false });
+    expect(parseSendArgs(["--session", SID, "--done", "hi there"])).toEqual({ sessionId: SID, text: "hi there", done: true });
+    expect(parseSendArgs([`--session=${SID}`, "-"])).toEqual({ sessionId: SID, text: "-", done: false });
     expect(parseSendArgs(["hi"])).toBe("--session <id> is required.");
     expect(typeof parseSendArgs(["--session", SID, "two", "words"])).toBe("string");
     expect(typeof parseSendArgs(["--session", SID, "--loud", "x"])).toBe("string");
+  });
+
+  test("--ping is still accepted, and changes nothing", () => {
+    expect(parseSendArgs(["--session", SID, "--ping", "--done", "hi there"])).toEqual({ sessionId: SID, text: "hi there", done: true });
+    expect(parseSendArgs(["--ping", "--session", SID, "hi"])).toEqual(parseSendArgs(["--session", SID, "hi"]));
   });
 });
 
@@ -61,14 +58,12 @@ describe("sk-discord send", () => {
     expect(k.rest.posted(k.control.id)).toHaveLength(0);
   });
 
-  test("--ping sends the mention and allowed_mentions.users with only the owner", async () => {
+  test("--ping posts the text as it is, mentioning nobody", async () => {
     const k = await connectedWithSession();
-    expect((await k.cli(["send", "--session", SID, "--ping", "Waiting for your OK"])).code).toBe(0);
+    expect(await k.cli(["send", "--session", SID, "--ping", "Waiting for your OK"])).toEqual({ code: 0, out: "", err: "" });
     await waitFor(() => k.rest.posted(k.channelId).length === 1);
-    expect(k.rest.posted(k.channelId)[0]).toMatchObject({
-      content: `<@${OWNER_ID}> Waiting for your OK`,
-      allowed_mentions: { parse: [], users: [OWNER_ID] },
-    });
+    expect(k.rest.posted(k.channelId)[0]).toMatchObject({ content: "Waiting for your OK", allowed_mentions: { parse: [] } });
+    expect(k.rest.posted(k.channelId)[0]!.content).not.toContain(OWNER_ID);
   });
 
   test("a text with @everyone sends parse: [] and pings nobody", async () => {
@@ -178,5 +173,33 @@ describe("sk-discord send", () => {
     const k = await connectedWithSession();
     expect((await k.cli(["send", "--session", SID, "   "])).code).toBe(1);
     expect((await k.cli(["send", "hello"])).code).toBe(1);
+  });
+});
+
+describe("no @mentions", () => {
+  test("no post or edit mentions the user, and every one sends allowed_mentions { parse: [] }", async () => {
+    const k = await inboundKit();
+    k.claude.addInteractive(k.sessionId);
+    const questions = [{ question: "Ship it?", header: "Ship", options: [{ label: "Yes", description: "" }, { label: "No", description: "" }] }];
+    const ask = { session_id: k.sessionId, hook_event_name: "PreToolUse", tool_name: "AskUserQuestion", tool_use_id: "toolu_01", tool_input: { questions } };
+    expect((await k.cli(["hook", "pre-ask"], { stdin: JSON.stringify(ask) })).code).toBe(0);
+    const prompt = { session_id: k.sessionId, cwd: "/work/session-kit", hook_event_name: "Notification", message: "Claude needs your permission to use Bash", notification_type: "permission_prompt" };
+    expect((await k.cli(["hook", "notification"], { stdin: JSON.stringify(prompt) })).code).toBe(0);
+    expect((await k.cli(["send", "--session", k.sessionId, "--ping", "Blocked until you answer."])).code).toBe(0);
+    await k.say("status");
+    await k.clock.advance(31 * 60_000);
+    await k.settle();
+    const answer = { ...ask, hook_event_name: "PostToolUse", tool_response: { questions, answers: { "Ship it?": "Yes" } } };
+    expect((await k.cli(["hook", "post-ask"], { stdin: JSON.stringify(answer) })).code).toBe(0);
+    await waitFor(() => k.rest.posted(k.channelId()).some((m) => m.edited));
+    await k.settle();
+
+    const writes = k.rest.requests.filter((r) => /\/messages(\/\d+)?$/.test(r.path) && (r.method === "POST" || r.method === "PATCH"));
+    // The question and its reminder, the permission prompt, the session's post, the status reply and the edit.
+    expect(writes.length).toBeGreaterThanOrEqual(6);
+    for (const write of writes) {
+      expect(write.body.content).not.toContain("<@");
+      expect(write.body.allowed_mentions).toEqual({ parse: [] });
+    }
   });
 });

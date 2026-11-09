@@ -12,8 +12,9 @@ function discordOn(deps: HookDeps): boolean {
 }
 
 /**
- * `sk-discord hook pre-ask` (PreToolUse on AskUserQuestion): record the questions, so they go to Discord if
- * nobody answers at the keyboard within 2 minutes. Prints nothing.
+ * `sk-discord hook pre-ask` (PreToolUse on AskUserQuestion): record the questions, so they go to Discord once
+ * the user has been away from the computer for 5 minutes, unless they're answered at the keyboard first.
+ * Prints nothing.
  */
 export async function preAskHook(deps: HookDeps): Promise<number> {
   const input = parseHookInput(await deps.readStdin());

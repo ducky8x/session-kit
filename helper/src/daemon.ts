@@ -8,15 +8,17 @@ import {
   timingFromEnv,
 } from "./channels.ts";
 import type { Clock } from "./clock.ts";
-import { type Config, batteryPollMinutes, loadConfig } from "./config.ts";
+import { type Config, awayMinutes, batteryPollMinutes, loadConfig } from "./config.ts";
 import { GatewayClient, type GatewayState } from "./discord/gateway.ts";
 import { MISSING_ACCESS, RestClient, RestError, UNKNOWN_GUILD } from "./discord/rest.ts";
 import type { Logger } from "./log.ts";
 import { NamePoller } from "./names.ts";
-import { Outbox, buildPosts } from "./outbound.ts";
+import { Outbox, type OutboxEntry, buildPosts } from "./outbound.ts";
 import type { Paths } from "./paths.ts";
 import { CursorStore, MessagePoller } from "./poller.ts";
 import { PowerMonitor } from "./power.ts";
+import { type IdleReading, Presence, isAway } from "./presence.ts";
+import { promptKey, toolResultSince } from "./prompts.ts";
 import type { ProcessRunner } from "./process.ts";
 import type { Keychain } from "./secrets.ts";
 import { ControlServer, HandlerRegistry, type Request, RequestError } from "./server.ts";
@@ -72,11 +74,42 @@ export interface PostedEvent {
   tag: string | null;
 }
 
+/** A held post was let go: it goes out next. `tag` is the one `post` was given. */
+export interface ReleasedEvent {
+  target: string;
+  tag: string | null;
+}
+
+/** How `post` treats a post while the user is at the computer. */
+export interface PostOptions {
+  /** Comes back with each piece's `onPosted` and `onReleased`. */
+  tag?: string;
+  /**
+   * Goes out at once even while the user is at the computer: a reply to what they typed in Discord, or a post
+   * whose timing was already checked.
+   */
+  ungated?: boolean;
+  /** The open item the post stands for (see `OutboxEntry.open`), such as `question:<id>` or `prompt:<session>`. */
+  open?: string;
+  /** For a permission prompt: the session's transcript. */
+  transcriptPath?: string | null;
+}
+
+export interface PostResult {
+  /** How many messages the post became. */
+  pieces: number;
+  /** It was queued held. The first idle reading may still let it go at once (see `onReleased`). */
+  held: boolean;
+  entries: OutboxEntry[];
+}
+
+/** For this long after the owner writes in a session's channel, the session's posts go out at once. */
+export const CONVERSATION_MS = 30 * MINUTE_MS;
+
 /** A session posted (`send`). `done` marks its run as finished. */
 export interface SendEvent {
   sessionId: string;
   text: string;
-  ping: boolean;
   done: boolean;
 }
 
@@ -100,11 +133,13 @@ const HANDLED_LIMIT = 1000;
  * `sk-discord daemon`: holds the gateway connection, the session registry and the outbox, serves the control
  * socket and runs the timers. With Discord off it still serves the socket (for `status` and turning it on)
  * but does not connect. On battery power it keeps no gateway connection and checks for new messages every few
- * minutes instead (`MessagePoller`); posts still go out at once.
+ * minutes instead (`MessagePoller`); posts don't wait for those checks. While the user is at the computer, posts
+ * are held (see `post`).
  *
  * Commands added later plug in through `handlers` (socket ops), `onInbound` (messages from Discord),
- * `onSend` (posts from sessions), `onPosted` (posts that reached Discord) and `onGatewayEvent` (any other
- * gateway event). `extensions.ts` lists them.
+ * `onSend` (posts from sessions), `onPosted` (posts that reached Discord), `onReleased` (held posts let go),
+ * `onOpenCheck` (whether a held open item is still open) and `onGatewayEvent` (any other gateway event).
+ * `extensions.ts` lists them.
  */
 export class Daemon {
   readonly handlers = new HandlerRegistry();
@@ -118,6 +153,7 @@ export class Daemon {
   readonly cursors: CursorStore;
   readonly poller: MessagePoller;
   readonly power: PowerMonitor;
+  readonly presence: Presence;
   private config: Config;
   private token: string | null = null;
   private notInServer = false;
@@ -130,6 +166,8 @@ export class Daemon {
   private readonly inboundHandlers: InboundHandler[] = [];
   private readonly sendListeners: ((event: SendEvent) => void)[] = [];
   private readonly postedListeners: ((event: PostedEvent) => void)[] = [];
+  private readonly releasedListeners: ((event: ReleasedEvent) => void)[] = [];
+  private readonly openChecks = new Map<string, (entry: OutboxEntry) => boolean | Promise<boolean>>();
   private readonly dispatchListeners: ((type: string, data: any) => void)[] = [];
   private readonly configListeners: ((config: Config, before: Config) => void)[] = [];
   private readonly unlinkedListeners: ((sessionId: string, why: UnlinkReason) => void)[] = [];
@@ -179,6 +217,7 @@ export class Daemon {
         }
       },
     });
+    this.presence = new Presence({ runner: d.runner, clock, log });
     this.outbox = new Outbox({
       file: paths.outbox,
       clock,
@@ -207,6 +246,19 @@ export class Daemon {
           }
         }
       },
+      readIdle: () => this.presence.read(),
+      awayMs: () => this.awayMs(),
+      isOpen: (entry) => this.isOpen(entry),
+      onReleased: (entry) => {
+        const event: ReleasedEvent = { target: entry.target, tag: entry.tag ?? null };
+        for (const listener of this.releasedListeners) {
+          try {
+            listener(event);
+          } catch (error) {
+            log.warn(`a released listener failed: ${(error as Error).message}`);
+          }
+        }
+      },
     });
     this.names = new NamePoller({
       runner: d.runner,
@@ -232,6 +284,7 @@ export class Daemon {
     });
     this.power = new PowerMonitor({ runner: d.runner, clock, log, onChange: () => this.onPowerChange() });
     this.server = new ControlServer(paths.socket, this.handlers, log);
+    this.onOpenCheck("prompt", (entry) => this.promptOpen(entry));
     this.addCoreHandlers();
     for (const install of d.extensions ?? []) install(this);
   }
@@ -249,6 +302,19 @@ export class Daemon {
   /** A post went out (with the tag `post` was given). */
   onPosted(listener: (event: PostedEvent) => void): void {
     this.postedListeners.push(listener);
+  }
+
+  /** A held post was let go, once for each piece (with the tag `post` was given). */
+  onReleased(listener: (event: ReleasedEvent) => void): void {
+    this.releasedListeners.push(listener);
+  }
+
+  /**
+   * Says whether open items of a kind (the part of `open` before the first colon) are still waiting on the
+   * user. Asked when the user is away, before a held post for one goes out. A kind with no check stays open.
+   */
+  onOpenCheck(kind: string, check: (entry: OutboxEntry) => boolean | Promise<boolean>): void {
+    this.openChecks.set(kind, check);
   }
 
   /** `config.json` was read again (`reload`); `before` is what it was. */
@@ -277,14 +343,71 @@ export class Daemon {
   }
 
   /**
-   * Queue a post for a session's channel (`target` is its session id) or for `#session-kit` (`control`):
-   * split, with an @mention of the owner when `ping` is set. `tag` comes back with each piece's
-   * `onPosted`. Returns how many messages it became.
+   * Queue a post for a session's channel (`target` is its session id) or for `#session-kit` (`control`),
+   * split to fit. It never @mentions anyone.
+   *
+   * Unless it's `ungated`, the post is held while the user is at the computer (see `Outbox`): it goes out once
+   * they've been away `awayMinutes`, and is dropped if they use the computer first, or, as an `open` item, goes
+   * out the first time they're away. A post for a session whose channel the owner wrote in during the last 30
+   * minutes isn't held: they're in a conversation there.
    */
-  post(target: string, body: string, o: { ping?: boolean; tag?: string } = {}): number {
-    const pieces = buildPosts(body, { ping: o.ping ?? false, ownerId: this.config.ownerId });
-    this.outbox.enqueue(pieces.map((p) => ({ ...p, target, ...(o.tag === undefined ? {} : { tag: o.tag }) })));
-    return pieces.length;
+  post(target: string, body: string, o: PostOptions = {}): PostResult {
+    const held = o.ungated !== true && !(target !== "control" && this.inConversation(target));
+    const extra = {
+      ...(o.tag === undefined ? {} : { tag: o.tag }),
+      ...(held ? { held: true } : {}),
+      ...(held && o.open !== undefined ? { open: o.open } : {}),
+      ...(held && o.transcriptPath ? { transcriptPath: o.transcriptPath } : {}),
+    };
+    const entries = this.outbox.enqueue(buildPosts(body).map((content) => ({ content, target, ...extra })));
+    return { pieces: entries.length, held, entries };
+  }
+
+  /** Minutes without keyboard or mouse input after which the user counts as away. */
+  awayMinutes(): number {
+    return awayMinutes(this.config);
+  }
+
+  private awayMs(): number {
+    return this.awayMinutes() * MINUTE_MS;
+  }
+
+  /** The owner wrote in the session's channel in the last 30 minutes. */
+  inConversation(sessionId: string): boolean {
+    const at = this.sessions.get(sessionId)?.ownerMessageAt ?? null;
+    return at !== null && this.deps.clock.now() - at < CONVERSATION_MS;
+  }
+
+  /** May a post for the session go out now, by this reading: is the user away, or in a conversation there? */
+  mayPostNow(sessionId: string, reading: IdleReading): boolean {
+    return this.inConversation(sessionId) || isAway(reading, this.awayMs());
+  }
+
+  /**
+   * The session moved on: the user typed a prompt, a turn ended, the session asked a question, posted, or ended.
+   * A permission prompt or input dialog held for it was answered, so it never goes out.
+   */
+  settlePrompts(sessionId: string): void {
+    this.outbox.discardHeld((e) => e.target === sessionId && e.open === promptKey(sessionId));
+  }
+
+  /** Is the permission prompt a held post stands for still waiting? Not once its transcript moved past it. */
+  private async promptOpen(entry: OutboxEntry): Promise<boolean> {
+    const session = this.sessions.get(entry.target);
+    if (!session || session.closedAt !== null) return false;
+    return !(entry.transcriptPath && (await toolResultSince(entry.transcriptPath, entry.madeAt ?? entry.at)));
+  }
+
+  private async isOpen(entry: OutboxEntry): Promise<boolean> {
+    const key = entry.open ?? "";
+    const check = this.openChecks.get(key.slice(0, Math.max(0, key.indexOf(":"))));
+    if (!check) return true;
+    try {
+      return await check(entry);
+    } catch (error) {
+      this.deps.log.warn(`checking an open item failed: ${(error as Error).message}`);
+      return true;
+    }
   }
 
   // ---- lifecycle ------------------------------------------------------------------------------
@@ -293,6 +416,8 @@ export class Daemon {
   async start(): Promise<void> {
     await this.server.listen();
     this.deps.log.info(`started, version ${VERSION}`);
+    // Posts held before a restart are checked again now.
+    this.outbox.recheck();
     await this.applyConfig();
   }
 
@@ -304,7 +429,8 @@ export class Daemon {
     await Promise.race([Promise.allSettled([...this.background, this.poller.settle()]), Bun.sleep(2000)]);
   }
 
-  private track(promise: Promise<unknown>): void {
+  /** Work started in the background that `settle` and `stop` wait for. */
+  track(promise: Promise<unknown>): void {
     const tracked = promise.catch((error) => this.deps.log.warn(`background work failed: ${(error as Error).message}`));
     this.background.add(tracked);
     void tracked.finally(() => this.background.delete(tracked));
@@ -428,7 +554,10 @@ export class Daemon {
       sessions: all.length,
       linked: all.filter((e) => e.channelId !== null).length,
       archived: all.filter((e) => e.archived).length,
-      outbox: this.outbox.size,
+      outbox: this.outbox.size - this.outbox.heldCount,
+      // Posts that wait for the user to be away from the computer.
+      held: this.outbox.heldCount,
+      awayMinutes: this.awayMinutes(),
       // On battery power the code stays `connected`; these say messages are read every few minutes.
       ...(this.poller.running ? { onBattery: true, pollMinutes: batteryPollMinutes(this.config) } : {}),
     };
@@ -560,7 +689,9 @@ export class Daemon {
       })
       .add("register", (req) => this.register(req))
       .add("ended", (req) => {
-        this.channels.ended(text(req.sessionId, "sessionId"));
+        const sessionId = text(req.sessionId, "sessionId");
+        this.settlePrompts(sessionId);
+        this.channels.ended(sessionId);
         return {};
       })
       .add("send", (req) => this.send(req));
@@ -600,6 +731,10 @@ export class Daemon {
   /**
    * A session posts in its channel. A session the helper does not know is registered first from what the
    * command sends along (its folder and entry point), so Discord turned on mid-session still works.
+   *
+   * With `prompt`, the post is a permission prompt or input dialog from the Notification hook: an open item that
+   * goes out the first time the user is away, unless the session moves on first (see `settlePrompts`). A newer
+   * one takes the place of one still held.
    */
   private async send(req: Request): Promise<Record<string, unknown>> {
     this.requireOn();
@@ -609,21 +744,29 @@ export class Daemon {
     if (!(await this.adopt(sessionId, optionalText(req.entrypoint), optionalText(req.cwd)))) {
       throw new RequestError("not-linked", "This session has no Discord channel (only interactive sessions get one).");
     }
-    const ping = req.ping === true;
+    // `ping` from an older session or script is ignored: posts never @mention the user.
     const done = req.done === true;
-    const pieces = this.post(sessionId, body, { ping });
+    const prompt = req.prompt === true;
+    // Either way, a permission prompt still held is moot: the session posted, or a newer prompt replaces it.
+    this.settlePrompts(sessionId);
+    const posted = prompt
+      ? this.post(sessionId, body, { open: promptKey(sessionId), transcriptPath: optionalText(req.transcriptPath) })
+      : this.post(sessionId, body);
     this.sessions.update(sessionId, (e) => {
       e.lastSendAt = this.deps.clock.now();
       if (done) e.doneAt = this.deps.clock.now();
     });
     for (const listener of this.sendListeners) {
       try {
-        listener({ sessionId, text: body, ping, done });
+        listener({ sessionId, text: body, done });
       } catch (error) {
         this.deps.log.warn(`a send listener failed: ${(error as Error).message}`);
       }
     }
-    return { queued: pieces, online: this.online() };
+    // The first idle reading says whether the post went out or is held. The Notification hook doesn't wait.
+    if (posted.held && !prompt) await this.outbox.checked();
+    const held = this.outbox.anyHeld(posted.entries);
+    return { queued: posted.pieces, online: this.online(), held, ...(held ? { awayMinutes: this.awayMinutes() } : {}) };
   }
 }
 

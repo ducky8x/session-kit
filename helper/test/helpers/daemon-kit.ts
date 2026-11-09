@@ -7,6 +7,7 @@ import { memoryLogger } from "../../src/log.ts";
 import { type CliDeps, runCli } from "../../src/main.ts";
 import { pathsFor } from "../../src/paths.ts";
 import { FakeClock } from "../fakes/fake-clock.ts";
+import { fakeIdle } from "../fakes/fake-idle.ts";
 import { FakeGateway } from "../fakes/fake-gateway.ts";
 import { MemoryKeychain } from "../fakes/fake-keychain.ts";
 import { FakeProcessRunner } from "../fakes/fake-process.ts";
@@ -39,7 +40,8 @@ export interface DaemonKitOptions {
 
 /**
  * A daemon on fakes: a loopback REST API and gateway, a fake clock, a keychain in memory, a process runner
- * that answers `claude agents --json`, and a temp HOME. Commands run through the real control socket.
+ * that answers `claude agents --json` and `ioreg` (the user has been away for an hour unless a test says
+ * otherwise with `idle`), and a temp HOME. Commands run through the real control socket.
  */
 export async function daemonKit(o: DaemonKitOptions = {}) {
   const rest = await FakeDiscordRest.start();
@@ -75,6 +77,8 @@ export async function daemonKit(o: DaemonKitOptions = {}) {
   const keychain = new MemoryKeychain(o.token === undefined ? TOKEN : o.token);
   const runner = o.runner ?? new FakeProcessRunner().answer(["/opt/tools/claude", "agents", "--json"], { stdout: "[]" });
   const clock = new FakeClock();
+  const idle = fakeIdle(runner, clock);
+  idle.idleFor(3_600_000);
   const log = memoryLogger();
   const daemon = new Daemon({
     paths,
@@ -132,6 +136,7 @@ export async function daemonKit(o: DaemonKitOptions = {}) {
     keychain,
     runner,
     clock,
+    idle,
     log,
     daemon,
     cli,

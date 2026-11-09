@@ -3,17 +3,21 @@ import type { Daemon, DiscordMessage } from "./daemon.ts";
 import type { DefaultAnswer, ListenerEvent, ParsedAnswer } from "./events.ts";
 import type { Inbound } from "./inbound.ts";
 import { readTailLines } from "./names.ts";
+import { NO_MENTIONS, type OutboxEntry } from "./outbound.ts";
 import { RequestError } from "./server.ts";
 import type { SessionEntry } from "./state.ts";
 import { WAKE_PROMPT_START } from "./wake.ts";
 
 const MINUTE = 60_000;
 
+/**
+ * When a question's steps come. The question itself goes to Discord the first time the user has been away from
+ * the computer `awayMinutes` while it's still open; the reminder and the defaults count from then.
+ */
 export interface QuestionTiming {
-  /** Asked at the keyboard first; posted on Discord when unanswered this long. */
-  postAfterMs: number;
+  /** No answer this long after the question went to Discord: remind the user. */
   remindAfterMs: number;
-  /** No answer: take the defaults and work autonomously. */
+  /** No answer this long after the question went to Discord: take the defaults and work autonomously. */
   autonomousAfterMs: number;
   /** Check-ins after going autonomous, until `send --done`. */
   checkinEveryMs: number;
@@ -22,7 +26,6 @@ export interface QuestionTiming {
 }
 
 export const QUESTION_TIMING: QuestionTiming = {
-  postAfterMs: 2 * MINUTE,
   remindAfterMs: 30 * MINUTE,
   autonomousAfterMs: 60 * MINUTE,
   checkinEveryMs: 60 * MINUTE,
@@ -56,7 +59,9 @@ export interface QuestionRecord {
   items: AskItem[];
   askedAt: number;
   status: "open" | "answered" | "defaulted";
+  /** When the question was let go to Discord. Until then it waits in the outbox for the user to be away. */
   postedAt: number | null;
+  /** When the reminder was queued. It too waits for the user to be away. */
   remindedAt: number | null;
   closedAt: number | null;
   source: "discord" | "keyboard" | null;
@@ -268,11 +273,18 @@ function describeAnswer(event: Extract<ListenerEvent, { type: "answer" }>): stri
   return `answer to your open question${event.late ? " (after the defaults were taken)" : ""}: ${chosen || event.raw}`;
 }
 
+/** The open item a question's posts stand for in the outbox. */
+function questionKey(id: string): string {
+  return `question:${id}`;
+}
+
 /**
- * Questions asked with AskUserQuestion, on Discord: recorded by the pre-ask hook; posted with a ping after
- * 2 minutes without a keyboard answer; a reminder at 30; the defaults and an `autonomous` event at 60; then
- * a check-in every hour until `send --done`. The first answer wins: a Discord reply becomes an `answer`
- * event, and a keyboard answer edits the post to say so. A reply after the defaults were taken is `late`.
+ * Questions asked with AskUserQuestion, on Discord: recorded by the pre-ask hook; posted the first time the
+ * user has been away from the computer `awayMinutes` (5) while nobody answered it at the keyboard; a reminder
+ * 30 minutes after the post, also once the user is away; the defaults and an `autonomous` event 60 minutes after
+ * the post; then a check-in every hour until `send --done`, skipped while the user is at the computer. The first
+ * answer wins: a Discord reply becomes an `answer` event, and a keyboard answer edits the post to say so. A reply
+ * after the defaults were taken is `late`.
  */
 export class Questions {
   private readonly timers = new Map<string, TimerHandle[]>();
@@ -292,6 +304,11 @@ export class Questions {
     // Steps skipped while Discord was off: the latest one that is due runs when it comes back on.
     this.daemon.onConfigChange((config, before) => {
       if (config.enabled && !before.enabled) this.resumeAll();
+    });
+    this.daemon.onOpenCheck("question", (entry) => this.isOpen(entry));
+    this.daemon.onReleased((event) => {
+      if (event.tag?.startsWith("question:")) this.markPosted(event.target, event.tag.slice("question:".length));
+      else if (event.tag?.startsWith("reminder:")) this.reminderSent(event.target, event.tag.slice("reminder:".length));
     });
     this.daemon.onPosted((event) => {
       if (event.tag === null || !event.tag.startsWith("question:")) return;
@@ -327,6 +344,7 @@ export class Questions {
         const sessionId = typeof req.sessionId === "string" ? req.sessionId : "";
         // A prompt also means the session's chat is under way, so it gets its channel if it has none.
         if (this.daemon.currentConfig().enabled) this.daemon.channels.activate(sessionId);
+        this.daemon.settlePrompts(sessionId);
         return { closed: this.answeredAtKeyboard(sessionId, null) };
       });
     this.resumeAll();
@@ -355,9 +373,20 @@ export class Questions {
     this.timers.set(sessionId, [...(this.timers.get(sessionId) ?? []), handle]);
   }
 
-  /** Record a new question for the session (replacing any open one) and start its timers. */
+  /** Drop the session's held question posts and reminders, which wait for the user to be away. */
+  private discardHeld(sessionId: string): void {
+    this.daemon.outbox.discardHeld((e) => e.target === sessionId && e.open?.startsWith("question:") === true);
+  }
+
+  /**
+   * Record a new question for the session (replacing any open one) and queue it, held until the user is away
+   * from the computer.
+   */
   open(sessionId: string, toolUseId: string | null, items: AskItem[], transcriptPath: string | null = null): string {
     const now = this.daemon.deps.clock.now();
+    this.discardHeld(sessionId);
+    // The session got as far as asking, so a permission prompt still held for it was answered.
+    this.daemon.settlePrompts(sessionId);
     const id = `q${now.toString(36)}${this.nextId++}`;
     const record: QuestionRecord = {
       id,
@@ -389,8 +418,8 @@ export class Questions {
   }
 
   /**
-   * Set the timers for the session's question from its record. After a long gap (the helper was down) only
-   * the latest overdue step runs.
+   * Queue the session's question if it hasn't gone to Discord and isn't waiting in the outbox, or set the timers
+   * for its later steps from its record. After a long gap (the helper was down) only the latest overdue step runs.
    */
   private arm(sessionId: string): void {
     this.clearTimers(sessionId);
@@ -398,11 +427,14 @@ export class Questions {
     if (!q) return;
     const now = this.daemon.deps.clock.now();
     if (q.status === "open") {
+      if (q.postedAt === null) {
+        if (!this.daemon.outbox.has((e) => e.tag === questionKey(q.id))) this.postQuestion(sessionId);
+        return;
+      }
       const t = this.timing;
       const steps = [
-        { run: () => this.postQuestion(sessionId), due: q.askedAt + t.postAfterMs, done: q.postedAt !== null },
-        { run: () => this.remind(sessionId), due: q.askedAt + t.remindAfterMs, done: q.remindedAt !== null },
-        { run: () => this.goAutonomous(sessionId), due: q.askedAt + t.autonomousAfterMs, done: false },
+        { run: () => this.remind(sessionId), due: q.postedAt + t.remindAfterMs, done: q.remindedAt !== null },
+        { run: () => this.goAutonomous(sessionId), due: q.postedAt + t.autonomousAfterMs, done: false },
       ].filter((s) => !s.done);
       const overdue = steps.filter((s) => s.due <= now);
       const last = overdue.at(-1);
@@ -447,24 +479,56 @@ export class Questions {
     return q && q.status === "open" ? q : null;
   }
 
+  /** Queue the question, held until the user is away (unless they're in a conversation in its channel). */
   private postQuestion(sessionId: string): void {
     const q = this.stillOpen(sessionId);
-    if (!q) return;
+    if (!q || q.postedAt !== null) return;
+    const key = questionKey(q.id);
+    const posted = this.daemon.post(sessionId, formatQuestions(q.items), { tag: key, open: key });
+    if (!posted.held) this.markPosted(sessionId, q.id);
+  }
+
+  /** The question went to Discord: the reminder and the defaults count from now. */
+  private markPosted(sessionId: string, id: string): void {
+    const q = this.stillOpen(sessionId);
+    if (!q || q.id !== id || q.postedAt !== null) return;
     this.save(sessionId, (r) => {
       r.postedAt = this.daemon.deps.clock.now();
     });
-    this.daemon.post(sessionId, formatQuestions(q.items), { ping: true, tag: `question:${q.id}` });
+    this.arm(sessionId);
   }
 
+  /**
+   * Is the question a held post stands for still open? Asked when the user is away, before it goes out. A dialog
+   * the transcript shows was closed with Esc or "clarify" is settled at the keyboard instead.
+   */
+  private async isOpen(entry: OutboxEntry): Promise<boolean> {
+    const id = (entry.open ?? "").slice("question:".length);
+    const q = this.stillOpen(entry.target);
+    if (!q || q.id !== id) return false;
+    if (q.toolUseId === null || !q.transcriptPath) return true;
+    const dismissed = await dismissedInTranscript(q.transcriptPath, q.toolUseId).catch(() => false);
+    if (!dismissed) return true;
+    if (this.question(entry.target)?.id === id) this.answeredAtKeyboard(entry.target, q.toolUseId);
+    return false;
+  }
+
+  /** Queue the reminder. Like the question, it waits until the user is away. */
   private remind(sessionId: string): void {
     const q = this.stillOpen(sessionId);
     if (!q) return;
-    if (q.postedAt === null) this.postQuestion(sessionId);
     this.save(sessionId, (r) => {
       r.remindedAt = this.daemon.deps.clock.now();
     });
-    this.daemon.post(sessionId, REMINDER_POST, { ping: true });
-    void this.inbound.route(sessionId, { type: "reminder", id: q.id }, {});
+    const posted = this.daemon.post(sessionId, REMINDER_POST, { tag: `reminder:${q.id}`, open: questionKey(q.id) });
+    if (!posted.held) this.reminderSent(sessionId, q.id);
+  }
+
+  /** The reminder went to Discord: tell the session. */
+  private reminderSent(sessionId: string, id: string): void {
+    const q = this.stillOpen(sessionId);
+    if (!q || q.id !== id) return;
+    void this.inbound.route(sessionId, { type: "reminder", id }, {});
   }
 
   private goAutonomous(sessionId: string): void {
@@ -479,20 +543,23 @@ export class Questions {
       r.checkins = 0;
       r.checkinsDone = false;
     });
+    // A reminder still waiting for the user to be away is moot now.
+    this.discardHeld(sessionId);
     const lines = defaults.map((d) => `${d.number}. ${d.question} ${d.answer ?? "(no default: its own call)"}`);
     this.daemon.post(sessionId, [AUTONOMOUS_POST, ...lines].join("\n"));
     void this.inbound.route(sessionId, { type: "autonomous", id: q.id, defaults }, {});
     this.armCheckin(sessionId);
   }
 
+  /**
+   * The hour for check-in `count` came. It goes out only if the user is away from the computer (or in a
+   * conversation in the channel); otherwise it's skipped, as it is with Discord off. Either way the next one
+   * comes an hour later.
+   */
   private checkin(sessionId: string, count: number): void {
     const entry = this.daemon.sessions.get(sessionId);
     const q = this.question(sessionId);
     if (!entry || !q || q.status !== "defaulted" || q.checkinsDone || q.autonomousAt === null) return;
-    if (!this.daemon.currentConfig().enabled) {
-      this.armCheckin(sessionId);
-      return;
-    }
     if (entry.doneAt !== null && entry.doneAt >= q.autonomousAt) {
       this.stopCheckins(sessionId);
       return;
@@ -502,10 +569,25 @@ export class Questions {
       r.checkins = count;
       if (last) r.checkinsDone = true;
     });
-    const tail = last ? " This is the last check-in until the session posts again." : " Reply here to steer it.";
-    this.daemon.post(sessionId, `Check-in ${count}: still working autonomously.${tail}`);
-    void this.inbound.route(sessionId, { type: "checkin", count }, {});
     if (!last) this.armCheckin(sessionId);
+    if (!this.daemon.currentConfig().enabled) return;
+    this.daemon.track(this.checkinIfAway(sessionId, q.id, count, last));
+  }
+
+  private async checkinIfAway(sessionId: string, id: string, count: number, last: boolean): Promise<void> {
+    const reading = await this.daemon.presence.read();
+    const entry = this.daemon.sessions.get(sessionId);
+    const q = this.question(sessionId);
+    if (!entry || !q || q.id !== id || q.status !== "defaulted" || q.autonomousAt === null) return;
+    if (!this.daemon.currentConfig().enabled || (entry.doneAt !== null && entry.doneAt >= q.autonomousAt)) return;
+    if (!this.daemon.mayPostNow(sessionId, reading)) {
+      this.daemon.deps.log.debug(`skipped check-in ${count} for session ${sessionId.slice(0, 8)}: the user is at the computer`);
+      return;
+    }
+    const tail = last ? " This is the last check-in until the session posts again." : " Reply here to steer it.";
+    // The idle time was just read, so the post goes out as it is.
+    this.daemon.post(sessionId, `Check-in ${count}: still working autonomously.${tail}`, { ungated: true });
+    void this.inbound.route(sessionId, { type: "checkin", count }, {});
   }
 
   /** `send --done`: the run is finished, so the check-ins stop. */
@@ -523,6 +605,7 @@ export class Questions {
     const q = this.stillOpen(sessionId);
     if (!q || (toolUseId !== null && q.toolUseId !== null && toolUseId !== q.toolUseId)) return false;
     this.clearTimers(sessionId);
+    this.discardHeld(sessionId);
     this.save(sessionId, (r) => {
       r.status = "answered";
       r.closedAt = this.daemon.deps.clock.now();
@@ -536,7 +619,7 @@ export class Questions {
     for (const post of posts) {
       try {
         await this.daemon.rest.request("PATCH", `/channels/${post.channelId}/messages/${post.messageId}`, {
-          body: { content: ANSWERED_AT_KEYBOARD, allowed_mentions: { parse: [] } },
+          body: { content: ANSWERED_AT_KEYBOARD, allowed_mentions: NO_MENTIONS },
         });
       } catch (error) {
         this.daemon.deps.log.warn(`could not mark a question post as answered: ${(error as Error).message}`);
@@ -562,6 +645,7 @@ export class Questions {
     };
     if (open) {
       this.clearTimers(session.sessionId);
+      this.discardHeld(session.sessionId);
       this.save(session.sessionId, (r) => {
         r.status = "answered";
         r.closedAt = this.daemon.deps.clock.now();

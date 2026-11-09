@@ -5,6 +5,7 @@ import {
   ANSWERED_AT_KEYBOARD,
   AUTONOMOUS_POST,
   type AskItem,
+  REMINDER_POST,
   classifyAskResponse,
   dismissedInTranscript,
   formatQuestions,
@@ -13,7 +14,6 @@ import {
   typedByUser,
 } from "../src/questions.ts";
 import { wakePrompt } from "../src/wake.ts";
-import { OWNER_ID } from "./fakes/fake-rest.ts";
 import { inboundKit } from "./helpers/inbound-kit.ts";
 import { tmpDir } from "./helpers/tmp.ts";
 import { waitFor } from "./helpers/wait.ts";
@@ -89,9 +89,14 @@ const ANSWERED = {
   answers: { "Which database should the service use?": "SQLite", "Add a cache?": "No (Default)" },
 };
 
-async function asked() {
+/**
+ * A session asked a question. The user has been away an hour, unless `present`: then they used the computer
+ * just as it was asked.
+ */
+async function asked(o: { present?: boolean } = {}) {
   const k = await inboundKit();
   k.claude.addInteractive(k.sessionId);
+  if (o.present) k.idle.touch();
   const r = await k.cli(["hook", "pre-ask"], { stdin: preAsk(k.sessionId) });
   expect(r).toEqual({ code: 0, out: "", err: "" });
   return k;
@@ -262,50 +267,86 @@ describe("telling a keyboard answer from a dialog that closed unanswered", () =>
 });
 
 describe("question timing", () => {
-  test("posted with a ping at 2:00, not at 1:59", async () => {
-    const k = await asked();
-    await k.clock.advance(2 * MINUTE - 1000);
+  test("asked while the user is at the computer, it's posted once they've been away 5 minutes, not before", async () => {
+    const k = await asked({ present: true });
+    await k.clock.advance(5 * MINUTE - 1000);
     await k.settle();
     expect(k.replies()).toEqual([]);
+    expect(k.daemon.outbox.heldCount).toBe(1);
     await k.clock.advance(1000);
     await k.settle();
     const posted = k.rest.posted(k.channelId());
     expect(posted).toHaveLength(1);
-    expect(posted[0]!.content.startsWith(`<@${OWNER_ID}> This session is waiting for an answer:`)).toBe(true);
-    expect(posted[0]!.allowed_mentions).toEqual({ parse: [], users: [OWNER_ID] });
+    expect(posted[0]!.content.startsWith("This session is waiting for an answer:")).toBe(true);
+    expect(posted[0]!.allowed_mentions).toEqual({ parse: [] });
+    expect(k.daemon.sessions.get(k.sessionId)!.question).toMatchObject({ status: "open", postedAt: k.clock.now() });
   });
 
-  test("a session whose chat has no channel yet gets one for its question at 2:00", async () => {
+  test("asked while the user is already away, it's posted at once", async () => {
+    const k = await inboundKit();
+    k.claude.addInteractive(k.sessionId);
+    k.idle.idleFor(5 * MINUTE);
+    expect((await k.cli(["hook", "pre-ask"], { stdin: preAsk(k.sessionId) })).code).toBe(0);
+    await k.settle();
+    expect(k.replies()).toHaveLength(1);
+    expect(k.replies()[0]!.startsWith("This session is waiting for an answer:")).toBe(true);
+  });
+
+  test("using the computer doesn't drop it: it waits for the first 5 minutes away", async () => {
+    const k = await asked({ present: true });
+    for (let i = 0; i < 20; i++) {
+      await k.clock.advance(MINUTE);
+      k.idle.touch();
+    }
+    await k.settle();
+    expect(k.replies()).toEqual([]);
+    await k.clock.advance(5 * MINUTE);
+    await k.settle();
+    expect(k.replies()).toHaveLength(1);
+  });
+
+  test("in a conversation in its channel, it's posted at once while the user is at the computer", async () => {
+    const k = await inboundKit();
+    k.claude.addInteractive(k.sessionId);
+    await k.say("go ahead with the migration");
+    k.idle.touch();
+    const before = k.replies().length;
+    expect((await k.cli(["hook", "pre-ask"], { stdin: preAsk(k.sessionId) })).code).toBe(0);
+    await k.settle();
+    expect(k.replies().slice(before).map((r) => r.split("\n")[0])).toEqual(["This session is waiting for an answer:"]);
+  });
+
+  test("a session whose chat has no channel yet gets one for its question", async () => {
     const k = await inboundKit();
     const id = "eeee5555-0000-4000-8000-000000000005";
     await k.register(id);
     k.claude.addInteractive(id);
     expect((await k.cli(["hook", "pre-ask"], { stdin: preAsk(id) })).code).toBe(0);
-    await k.clock.advance(2 * MINUTE);
     await k.settle();
     const channelId = k.daemon.sessions.get(id)!.channelId;
     expect(channelId).not.toBeNull();
     const posted = k.rest.posted(channelId!);
     expect(posted).toHaveLength(1);
-    expect(posted[0]!.content.startsWith(`<@${OWNER_ID}> This session is waiting for an answer:`)).toBe(true);
+    expect(posted[0]!.content.startsWith("This session is waiting for an answer:")).toBe(true);
   });
 
   test("a keyboard answer at 1:30 posts nothing, ever", async () => {
-    const k = await asked();
+    const k = await asked({ present: true });
     await k.clock.advance(90_000);
     expect((await k.cli(["hook", "post-ask"], { stdin: postAsk(k.sessionId, ANSWERED) })).code).toBe(0);
     await k.clock.advance(2 * HOUR);
     await k.settle();
     expect(k.replies()).toEqual([]);
+    expect(k.daemon.outbox.size).toBe(0);
   });
 
-  test("a dialog that closed unanswered keeps the question open: it still goes to Discord at 2:00", async () => {
-    const k = await asked();
+  test("a dialog that closed unanswered keeps the question open: it still goes to Discord once the user is away", async () => {
+    const k = await asked({ present: true });
     await k.clock.advance(MINUTE);
     // The idle timeout's result: what was picked before the user went idle, and how long Claude Code waited.
     const timedOut = { questions: QUESTIONS, answers: { "Add a cache?": "Yes" }, annotations: {}, afkTimeoutMs: 60_000 };
     expect((await k.cli(["hook", "post-ask"], { stdin: postAsk(k.sessionId, timedOut) })).code).toBe(0);
-    await k.clock.advance(MINUTE);
+    await k.clock.advance(4 * MINUTE);
     await k.settle();
     expect(k.replies()).toHaveLength(1);
   });
@@ -363,13 +404,14 @@ describe("question timing", () => {
   });
 
   test("a prompt typed at 1:00 (the dialog was dismissed) settles the question: nothing goes to Discord", async () => {
-    const k = await asked();
+    const k = await asked({ present: true });
     await k.clock.advance(MINUTE);
     expect(await k.cli(["hook", "prompt"], { stdin: prompt(k.sessionId, "never mind, use SQLite") })).toEqual({ code: 0, out: "", err: "" });
     await k.clock.advance(2 * HOUR);
     await k.settle();
     expect(k.replies()).toEqual([]);
     expect(k.daemon.sessions.get(k.sessionId)!.question).toMatchObject({ status: "answered", source: "keyboard" });
+    expect(k.daemon.outbox.size).toBe(0);
   });
 
   test("a prompt typed after the post marks it answered, and no reminder or autonomous step follows", async () => {
@@ -385,31 +427,31 @@ describe("question timing", () => {
     expect(k.replies()).toHaveLength(1);
   });
 
-  test("a dialog closed with Esc, with no prompt after it, is settled at 2:00 instead of posted", async () => {
+  test("a dialog closed with Esc, with no prompt after it, is settled when the user is away instead of posted", async () => {
     const k = await inboundKit();
     k.claude.addInteractive(k.sessionId);
     const transcript = `${tmpDir()}/t.jsonl`;
     writeFileSync(transcript, transcriptLines());
+    k.idle.touch();
     expect((await k.cli(["hook", "pre-ask"], { stdin: preAsk(k.sessionId, "toolu_01", transcript) })).code).toBe(0);
     await k.clock.advance(MINUTE);
     writeFileSync(transcript, transcriptLines({ is_error: true, content: REJECTED }));
-    await k.clock.advance(MINUTE);
+    await k.clock.advance(4 * MINUTE);
     await waitFor(() => k.daemon.sessions.get(k.sessionId)!.question?.status === "answered");
     await k.clock.advance(2 * HOUR);
     await k.settle();
     expect(k.replies()).toEqual([]);
   });
 
-  test("a dialog still open, or closed by the idle timeout, goes out at 2:00; a later Esc stops the reminder", async () => {
+  test("a dialog still open, or closed by the idle timeout, goes out; a later Esc stops the reminder", async () => {
     const k = await inboundKit();
     k.claude.addInteractive(k.sessionId);
     const transcript = `${tmpDir()}/t.jsonl`;
     writeFileSync(transcript, transcriptLines());
     expect((await k.cli(["hook", "pre-ask"], { stdin: preAsk(k.sessionId, "toolu_01", transcript) })).code).toBe(0);
-    await k.clock.advance(2 * MINUTE);
     await waitFor(() => k.replies().length === 1);
     // The user comes back at 10:00 and closes the dialog with Esc: no reminder at 30:00, no defaults at 60:00.
-    await k.clock.advance(8 * MINUTE);
+    await k.clock.advance(10 * MINUTE);
     writeFileSync(transcript, transcriptLines({ is_error: true, content: REJECTED }));
     await k.clock.advance(20 * MINUTE);
     await waitFor(() => k.daemon.sessions.get(k.sessionId)!.question?.status === "answered");
@@ -424,12 +466,11 @@ describe("question timing", () => {
     const timedOut = `${tmpDir()}/t.jsonl`;
     writeFileSync(timedOut, transcriptLines({ content: "No response after 60s.", toolUseResult: { questions: QUESTIONS, answers: {}, afkTimeoutMs: 60_000 } }));
     expect((await t.cli(["hook", "pre-ask"], { stdin: preAsk(t.sessionId, "toolu_01", timedOut) })).code).toBe(0);
-    await t.clock.advance(2 * MINUTE);
     await waitFor(() => t.replies().length === 1);
   });
 
   test("the wake prompt, task notifications and messages from other sessions don't count as the user", async () => {
-    const k = await asked();
+    const k = await asked({ present: true });
     await k.clock.advance(MINUTE);
     for (const text of [
       wakePrompt("1a 2b"),
@@ -438,7 +479,7 @@ describe("question timing", () => {
     ]) {
       expect((await k.cli(["hook", "prompt"], { stdin: prompt(k.sessionId, text) })).code).toBe(0);
     }
-    await k.clock.advance(MINUTE);
+    await k.clock.advance(4 * MINUTE);
     await k.settle();
     expect(k.replies()).toHaveLength(1);
   });
@@ -464,7 +505,7 @@ describe("question timing", () => {
     await waitFor(() => events.length === 1);
     expect(events[0]).toEqual({ type: "reminder", id: expect.any(String) });
     expect(k.replies()).toHaveLength(2);
-    expect(k.rest.posted(k.channelId())[1]!.content.startsWith(`<@${OWNER_ID}> Reminder:`)).toBe(true);
+    expect(k.rest.posted(k.channelId())[1]!.content.startsWith("Reminder:")).toBe(true);
 
     await k.attached();
     await k.clock.advance(30 * MINUTE);
@@ -492,6 +533,139 @@ describe("question timing", () => {
       expect(events[hour]).toEqual({ type: "checkin", count: hour - 1 });
     }
     expect(k.replies().filter((r) => r.startsWith("Check-in"))).toHaveLength(2);
+  });
+
+  test("the reminder and the defaults count from the post, not from when the question was asked", async () => {
+    const k = await asked({ present: true });
+    await k.clock.advance(5 * MINUTE);
+    await k.settle();
+    expect(k.replies()).toHaveLength(1);
+    await k.clock.advance(30 * MINUTE - 1000);
+    await k.settle();
+    expect(k.replies()).toHaveLength(1);
+    await k.clock.advance(1000);
+    await k.settle();
+    expect(k.replies()[1]).toBe(REMINDER_POST);
+    await k.clock.advance(30 * MINUTE - 1000);
+    await k.settle();
+    expect(k.replies()).toHaveLength(2);
+    await k.clock.advance(1000);
+    await k.settle();
+    expect(k.replies()[2]!.startsWith(AUTONOMOUS_POST)).toBe(true);
+    expect(k.daemon.sessions.get(k.sessionId)!.question).toMatchObject({ status: "defaulted", autonomousAt: k.clock.now() });
+  });
+
+  test("the reminder waits while the user is at the computer, isn't dropped for it, and its event comes with it", async () => {
+    const k = await asked();
+    await k.settle();
+    expect(k.replies()).toHaveLength(1);
+    const events: unknown[] = [];
+    void (async () => {
+      for (;;) {
+        const event = await k.listen().catch(() => null);
+        if (event === null) return;
+        events.push(event);
+      }
+    })();
+    await k.attached();
+    // The user is back at 25:00 and keeps using the computer until 40:00.
+    await k.clock.advance(25 * MINUTE);
+    for (let i = 0; i < 15; i++) {
+      k.idle.touch();
+      await k.clock.advance(MINUTE);
+    }
+    k.idle.touch();
+    await k.settle();
+    expect(k.replies()).toHaveLength(1);
+    expect(events).toEqual([]);
+    await k.clock.advance(5 * MINUTE);
+    await k.settle();
+    expect(k.replies()[1]).toBe(REMINDER_POST);
+    await waitFor(() => events.length === 1);
+    expect(events[0]).toEqual({ type: "reminder", id: expect.any(String) });
+  });
+
+  test("a held reminder is dropped when the defaults are taken first", async () => {
+    const k = await asked();
+    await k.settle();
+    await k.clock.advance(29 * MINUTE);
+    for (let i = 0; i < 31; i++) {
+      k.idle.touch();
+      await k.clock.advance(MINUTE);
+    }
+    await k.settle();
+    expect(k.replies()).toHaveLength(1);
+    expect(k.daemon.sessions.get(k.sessionId)!.question).toMatchObject({ status: "defaulted" });
+    // The autonomous notice was made while the user was active, so it's held too; the reminder is gone.
+    expect(k.daemon.outbox.heldCount).toBe(1);
+    await k.clock.advance(5 * MINUTE);
+    await k.settle();
+    expect(k.replies()).toHaveLength(2);
+    expect(k.replies()[1]!.startsWith(AUTONOMOUS_POST)).toBe(true);
+  });
+
+  test("the defaults are taken on time while the user is at the computer; the notice is dropped if they stay", async () => {
+    const k = await asked();
+    await k.settle();
+    expect(k.replies()).toHaveLength(1);
+    await k.clock.advance(59 * MINUTE + 30_000);
+    await k.settle();
+    expect(k.replies()).toHaveLength(2); // the reminder, at 30:00
+    k.idle.touch();
+    await k.clock.advance(30_000);
+    await k.settle();
+    expect(k.daemon.sessions.get(k.sessionId)!.question).toMatchObject({ status: "defaulted" });
+    expect(k.daemon.outbox.heldCount).toBe(1);
+    await k.clock.advance(15_000);
+    k.idle.touch();
+    await k.clock.advance(15_000);
+    await k.settle();
+    expect(k.daemon.outbox.size).toBe(0);
+    await k.clock.advance(10 * MINUTE);
+    await k.settle();
+    expect(k.replies()).toHaveLength(2);
+    // The session still got the defaults.
+    expect(await k.listen()).toMatchObject({ type: "reminder", queued: true });
+    expect(await k.listen()).toMatchObject({ type: "autonomous", queued: true });
+  });
+
+  test("a check-in due while the user is at the computer is skipped, and the next comes an hour later", async () => {
+    const k = await asked();
+    await k.settle();
+    await k.clock.advance(HOUR);
+    await k.settle();
+    expect(k.replies()[2]!.startsWith(AUTONOMOUS_POST)).toBe(true);
+    await k.clock.advance(HOUR - 10_000);
+    k.idle.touch();
+    await k.clock.advance(10_000);
+    await k.settle();
+    expect(k.replies().filter((r) => r.startsWith("Check-in"))).toEqual([]);
+    expect(k.log.lines).toContain(`debug skipped check-in 1 for session ${k.sessionId.slice(0, 8)}: the user is at the computer`);
+    await k.clock.advance(HOUR - 1000);
+    await k.settle();
+    expect(k.replies().filter((r) => r.startsWith("Check-in"))).toEqual([]);
+    await k.clock.advance(1000);
+    await k.settle();
+    expect(k.replies().filter((r) => r.startsWith("Check-in"))).toEqual(["Check-in 2: still working autonomously. Reply here to steer it."]);
+  });
+
+  test("with Discord off, check-ins are skipped rather than tried again at once, and resume when it's back on", async () => {
+    const k = await asked();
+    await k.settle();
+    await k.clock.advance(HOUR);
+    await k.settle();
+    k.setConfig((c) => {
+      c.enabled = false;
+    });
+    await k.call({ op: "reload" });
+    await k.clock.advance(3 * HOUR);
+    await k.settle();
+    expect(k.daemon.sessions.get(k.sessionId)!.question).toMatchObject({ checkins: 3 });
+    expect((await k.cli(["on"])).code).toBe(0);
+    await k.connected();
+    await k.clock.advance(HOUR);
+    await k.settle();
+    expect(k.replies().filter((r) => r.startsWith("Check-in"))).toEqual(["Check-in 4: still working autonomously. Reply here to steer it."]);
   });
 
   test("send --done stops the check-ins", async () => {
@@ -522,8 +696,8 @@ describe("question timing", () => {
     expect(await next).toMatchObject({ type: "answer", answers: [{ number: 1, letter: "a", option: "SQLite" }], missing: [2], late: true });
   });
 
-  test("with Discord turned off, an open question is not posted", async () => {
-    const k = await asked();
+  test("with Discord turned off, an open question is not posted; turned on again, it is, once the user is away", async () => {
+    const k = await asked({ present: true });
     k.setConfig((c) => {
       c.enabled = false;
     });
@@ -532,14 +706,45 @@ describe("question timing", () => {
     await k.settle();
     expect(k.rest.posted(k.channelId())).toHaveLength(0);
     expect(k.daemon.outbox.size).toBe(0);
-    // Turned on again: the latest step that is due runs once (the hour has passed, so the defaults).
+    expect((await k.cli(["on"])).code).toBe(0);
+    await k.connected();
+    await k.settle();
+    const posts = k.rest.posted(k.channelId()).map((m) => m.content);
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.startsWith("This session is waiting for an answer:")).toBe(true);
+  });
+
+  test("with Discord off after the post, the latest step that came due runs once when it's back on", async () => {
+    const k = await asked();
+    await k.settle();
+    expect(k.replies()).toHaveLength(1);
+    k.setConfig((c) => {
+      c.enabled = false;
+    });
+    await k.call({ op: "reload" });
+    await k.clock.advance(2 * HOUR);
+    await k.settle();
+    expect(k.replies()).toHaveLength(1);
     expect((await k.cli(["on"])).code).toBe(0);
     await k.connected();
     await k.clock.advance(0);
     await k.settle();
-    const posts = k.rest.posted(k.channelId()).map((m) => m.content);
-    expect(posts).toHaveLength(1);
-    expect(posts[0]!.startsWith(AUTONOMOUS_POST)).toBe(true);
+    const posts = k.replies();
+    expect(posts).toHaveLength(2);
+    expect(posts[1]!.startsWith(AUTONOMOUS_POST)).toBe(true);
+  });
+
+  test("a question held when the helper restarts is posted once, when the user is away", async () => {
+    const k = await asked({ present: true });
+    await k.clock.advance(MINUTE);
+    await k.settle();
+    // A fresh features install on the same daemon state, as after a restart.
+    sessionFeatures(k.daemon).questions.resumeAll();
+    await k.settle();
+    expect(k.daemon.outbox.heldCount).toBe(1);
+    await k.clock.advance(4 * MINUTE);
+    await k.settle();
+    expect(k.replies()).toHaveLength(1);
   });
 
   test("open questions survive a restart: overdue steps run once, the rest keep their times", async () => {

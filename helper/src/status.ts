@@ -48,6 +48,12 @@ export function batteryLine(minutes: number): string {
   return `On battery: checking Discord every ${minutes === 1 ? "minute" : `${minutes} minutes`}.`;
 }
 
+/** The line `status` adds while posts wait for the user to be away from the computer. */
+export function heldStatusLine(count: number, minutes: number): string {
+  const posts = count === 1 ? "1 post" : `${count} posts`;
+  return `Held while you're at the computer: ${posts} (they go out after ${minutes === 1 ? "1 minute" : `${minutes} minutes`} away).`;
+}
+
 /** What `send` and the hooks print when nothing answers on the socket. */
 export const HELPER_DOWN =
   "The Discord helper isn't running (launchctl kickstart -k gui/$UID/io.github.ducky8x.session-kit.discord)";
