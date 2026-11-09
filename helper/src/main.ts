@@ -131,6 +131,7 @@ export const COMMANDS: Record<string, Command> = {
       env: deps.env,
       cwd: deps.cwd,
       readStdin: deps.readStdin,
+      out: deps.out,
       err: deps.err,
       call: deps.call ?? callHelper,
     }),

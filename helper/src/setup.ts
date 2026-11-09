@@ -8,7 +8,7 @@ import { silentLogger } from "./log.ts";
 import type { Paths } from "./paths.ts";
 import type { ProcessRunner } from "./process.ts";
 import { type Keychain, isPlausibleToken } from "./secrets.ts";
-import { HELPER_DOWN, STATUS_PROBLEMS, type StatusCode, batteryLine } from "./status.ts";
+import { HELPER_DOWN, STATUS_PROBLEMS, type StatusCode, batteryLine, heldStatusLine } from "./status.ts";
 import { installed, readUpdateFailure } from "./update.ts";
 
 /** Manage Channels (16), View Channels (1024), Send Messages (2048), Read Message History (65536). */
@@ -360,6 +360,7 @@ export async function statusCommand(args: readonly string[], d: SetupDeps): Prom
   if (fields.running === false) lines.push("The helper isn't running yet.");
   else lines.push(`Sessions: ${fields.sessions} (${fields.linked} with a channel, ${fields.archived} archived)`);
   if (fields.outbox > 0) lines.push(`Posts waiting: ${fields.outbox}`);
+  if (fields.held > 0 && typeof fields.awayMinutes === "number") lines.push(heldStatusLine(fields.held, fields.awayMinutes));
   d.out(`${lines.join("\n")}\n`);
   return 0;
 }

@@ -1,5 +1,5 @@
 import { type CallHelper, HelperError, NOT_RUNNING } from "./client.ts";
-import { configExists, loadConfig } from "./config.ts";
+import { DEFAULT_AWAY_MINUTES, configExists, loadConfig } from "./config.ts";
 import type { Paths } from "./paths.ts";
 import { HELPER_DOWN } from "./status.ts";
 
@@ -8,6 +8,11 @@ export const SEND_EXIT = { ok: 0, error: 1, helperDown: 2, off: 3, notLinked: 4 
 export const OFF_MESSAGE = "Discord is off (/discord on to turn it on)";
 /** Registering an unknown session first can take a moment; the post itself is only queued. */
 export const SEND_TIMEOUT_MS = 10_000;
+
+/** What `send` prints when the post is held because the user is at the computer. */
+export function heldLine(minutes: number): string {
+  return `Held: you're at the computer. It goes out if you're away for ${minutes === 1 ? "1 minute" : `${minutes} minutes`}.`;
+}
 
 export const SEND_USAGE = 'usage: sk-discord send --session <id> [--done] "<text>"   ("-" reads the text from stdin)';
 
@@ -47,13 +52,15 @@ export interface SendDeps {
   env: Record<string, string | undefined>;
   cwd: string;
   readStdin(): Promise<string>;
+  out(text: string): void;
   err(text: string): void;
   call: CallHelper;
 }
 
 /**
- * `sk-discord send --session <id> [--done] "<text>"`: post in the session's channel.
- * Exit 0 posted or queued, 1 error, 2 helper not running, 3 Discord off, 4 session not linked.
+ * `sk-discord send --session <id> [--done] "<text>"`: post in the session's channel. A post held while the
+ * user is at the computer prints one line saying so.
+ * Exit 0 posted, queued or held, 1 error, 2 helper not running, 3 Discord off, 4 session not linked.
  */
 export async function sendCommand(args: readonly string[], deps: SendDeps): Promise<number> {
   const parsed = parseSendArgs(args);
@@ -67,7 +74,7 @@ export async function sendCommand(args: readonly string[], deps: SendDeps): Prom
   }
   const text = parsed.text === "-" ? await deps.readStdin() : parsed.text;
   try {
-    await deps.call(
+    const reply = await deps.call(
       deps.paths.socket,
       {
         op: "send",
@@ -79,6 +86,7 @@ export async function sendCommand(args: readonly string[], deps: SendDeps): Prom
       },
       { timeoutMs: SEND_TIMEOUT_MS },
     );
+    if (reply.held === true) deps.out(`${heldLine(typeof reply.awayMinutes === "number" ? reply.awayMinutes : DEFAULT_AWAY_MINUTES)}\n`);
     return SEND_EXIT.ok;
   } catch (error) {
     const code = error instanceof HelperError ? error.code : "error";

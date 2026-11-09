@@ -524,6 +524,7 @@ export class ChannelManager {
       e.renamedAt = from.renamedAt;
       e.wantsChannel = false;
       e.lastMessageAt = this.d.clock.now();
+      e.ownerMessageAt = Math.max(from.ownerMessageAt ?? 0, e.ownerMessageAt ?? 0) || null;
       e.inbox = [...carried, ...e.inbox].slice(-INBOX_LIMIT);
     });
     this.d.sessions.update(from.sessionId, (e) => {
@@ -631,6 +632,7 @@ export class ChannelManager {
     if (fromOwner) entry = await this.followChat(entry);
     this.d.sessions.update(entry.sessionId, (e) => {
       e.lastMessageAt = this.d.clock.now();
+      if (fromOwner) e.ownerMessageAt = this.d.clock.now();
     });
     if (fromOwner && entry.archived) await this.unarchive(entry.sessionId);
     return this.d.sessions.get(entry.sessionId) ?? null;

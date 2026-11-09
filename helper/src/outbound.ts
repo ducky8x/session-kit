@@ -168,6 +168,11 @@ export class Outbox {
     if (this.queue.some((e) => e.held)) this.checkSoon();
   }
 
+  /** Resolves when no check of the held posts is under way. */
+  async checked(): Promise<void> {
+    while (this.checking) await this.checking;
+  }
+
   /**
    * Discord became reachable (true: the gateway connected, or checks on battery power began) or not (false).
    * Coming online sends what is waiting.
