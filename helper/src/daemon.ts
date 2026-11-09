@@ -89,7 +89,7 @@ export interface PostOptions {
    * whose timing was already checked.
    */
   ungated?: boolean;
-  /** The open item the post stands for (see `OutboxEntry.open`), such as `question:<session>:<id>`. */
+  /** The open item the post stands for (see `OutboxEntry.open`), such as `question:<id>` or `prompt:<session>`. */
   open?: string;
   /** For a permission prompt: the session's transcript. */
   transcriptPath?: string | null;
@@ -133,11 +133,13 @@ const HANDLED_LIMIT = 1000;
  * `sk-discord daemon`: holds the gateway connection, the session registry and the outbox, serves the control
  * socket and runs the timers. With Discord off it still serves the socket (for `status` and turning it on)
  * but does not connect. On battery power it keeps no gateway connection and checks for new messages every few
- * minutes instead (`MessagePoller`); posts still go out at once.
+ * minutes instead (`MessagePoller`); posts don't wait for those checks. While the user is at the computer, posts
+ * are held (see `post`).
  *
  * Commands added later plug in through `handlers` (socket ops), `onInbound` (messages from Discord),
- * `onSend` (posts from sessions), `onPosted` (posts that reached Discord) and `onGatewayEvent` (any other
- * gateway event). `extensions.ts` lists them.
+ * `onSend` (posts from sessions), `onPosted` (posts that reached Discord), `onReleased` (held posts let go),
+ * `onOpenCheck` (whether a held open item is still open) and `onGatewayEvent` (any other gateway event).
+ * `extensions.ts` lists them.
  */
 export class Daemon {
   readonly handlers = new HandlerRegistry();

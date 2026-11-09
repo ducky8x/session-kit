@@ -3,8 +3,8 @@ import { installSessionFeatures } from "./features.ts";
 
 /**
  * A feature that plugs into the daemon when it is built: it adds socket ops to `daemon.handlers` and listens
- * with `daemon.onInbound`, `daemon.onSend`, `daemon.onPosted`, `daemon.onConfigChange`, `daemon.onUnlinked`
- * and `daemon.onGatewayEvent`.
+ * with `daemon.onInbound`, `daemon.onSend`, `daemon.onPosted`, `daemon.onReleased`, `daemon.onOpenCheck`,
+ * `daemon.onConfigChange`, `daemon.onUnlinked` and `daemon.onGatewayEvent`.
  */
 export type Extension = (daemon: Daemon) => void;
 
