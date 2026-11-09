@@ -1,7 +1,9 @@
 import { backoffMs } from "./backoff.ts";
 import type { Clock, TimerHandle } from "./clock.ts";
 import { type RestClient, RestError, UNKNOWN_CHANNEL } from "./discord/rest.ts";
+import { DEFAULT_AWAY_MINUTES } from "./config.ts";
 import type { Logger } from "./log.ts";
+import { type IdleReading, isAway, lastInputAt } from "./presence.ts";
 import { DISCORD_MAX_TEXT, splitMessage } from "./split.ts";
 import { readJsonLines, writeFileAtomic } from "./state.ts";
 
@@ -28,10 +30,28 @@ export interface OutboxEntry {
   tag?: string;
   /** The post already met a deleted channel once; a second time drops it. */
   remade?: boolean;
+  /** Held until the user is away from the computer (see `Outbox`). A held post isn't sent. */
+  held?: boolean;
+  /** When a held post was made. */
+  madeAt?: number;
+  /** When the keyboard or mouse was last used, as read just after a held post was made. */
+  inputAt?: number;
+  /**
+   * The open item a held post stands for, such as a question or a permission prompt. Using the computer doesn't
+   * drop it: it goes out once the user is away, if it's still open then.
+   */
+  open?: string;
+  /** For a permission prompt: the session's transcript, read to see whether it was handled at the keyboard. */
+  transcriptPath?: string;
 }
 
 /** Posts that waited longer than this are dropped rather than sent late. */
 export const OUTBOX_MAX_AGE_MS = 24 * 3_600_000;
+
+/** While posts are held, the idle time is read this often. */
+export const HOLD_CHECK_MS = 30_000;
+/** Readings of the last input can differ by the time ioreg takes, so later input must be newer by this much. */
+const INPUT_SLACK_MS = 2000;
 
 /** A time in a notice: local date and time, to the minute. */
 export function formatTime(ms: number): string {
@@ -58,11 +78,25 @@ export interface OutboxDeps {
   onUnknownChannel(entry: OutboxEntry, channelId: string): void;
   /** A post went out. */
   onPosted?(entry: OutboxEntry, channelId: string, messageId: string): void;
+  /** Reads the user's idle time. Without it the idle time is unknown, which counts as away. */
+  readIdle?(): Promise<IdleReading>;
+  /** How long without keyboard or mouse input counts as away. Default 5 minutes. */
+  awayMs?(): number;
+  /** Is the open item a held post stands for still waiting on the user? Without it, yes. */
+  isOpen?(entry: OutboxEntry): Promise<boolean>;
+  /** A held post was let go: it goes out next. */
+  onReleased?(entry: OutboxEntry): void;
 }
 
 /**
  * Posts on their way to Discord, kept in `outbox.jsonl` so none is lost to a restart or an outage. They go out
  * one at a time, in the order they were queued, whenever the helper is online.
+ *
+ * A held post waits while the user is at the computer. The idle time is read when it's queued and every 30
+ * seconds while anything is held. A post goes out once the user has gone `awayMs` without input, and is dropped
+ * if they used the computer after it was made. An open item (`open`) isn't dropped for that: it goes out the
+ * first time the user is away, unless `isOpen` says it was settled. Held posts keep their place in the queue;
+ * posts that aren't held go out past them.
  */
 export class Outbox {
   private queue: OutboxEntry[];
@@ -72,6 +106,9 @@ export class Outbox {
   private failures = 0;
   private nextId = 1;
   private closed = false;
+  private holdTimer: TimerHandle | null = null;
+  private checking: Promise<void> | null = null;
+  private checkAgain = false;
 
   constructor(private readonly d: OutboxDeps) {
     this.queue = readJsonLines(d.file).filter(isEntry).map(withoutMention);
@@ -81,13 +118,54 @@ export class Outbox {
     return this.queue.length;
   }
 
-  /** Queue posts (the pieces of one message go in together, so nothing slips between them). */
-  enqueue(posts: readonly Omit<OutboxEntry, "id" | "at">[]): void {
-    if (posts.length === 0) return;
+  /** How many posts are held until the user is away. */
+  get heldCount(): number {
+    return this.queue.filter((e) => e.held).length;
+  }
+
+  /**
+   * Queue posts (the pieces of one message go in together, so nothing slips between them) and return them as
+   * queued. Held posts are checked against the idle time at once.
+   */
+  enqueue(posts: readonly Omit<OutboxEntry, "id" | "at">[]): OutboxEntry[] {
+    if (posts.length === 0) return [];
     const at = this.d.clock.now();
-    for (const post of posts) this.queue.push({ ...post, id: `${at.toString(36)}-${this.nextId++}`, at });
+    const added = posts.map((post) => ({
+      ...post,
+      id: `${at.toString(36)}-${this.nextId++}`,
+      at,
+      ...(post.held ? { madeAt: at } : {}),
+    }));
+    this.queue.push(...added);
     this.save();
+    if (added.some((e) => e.held)) this.checkSoon();
     this.kick();
+    return added;
+  }
+
+  /** Are any of these posts still held? */
+  anyHeld(entries: readonly OutboxEntry[]): boolean {
+    return entries.some((e) => e.held === true && this.queue.includes(e));
+  }
+
+  /** Is a post like this queued? */
+  has(match: (entry: OutboxEntry) => boolean): boolean {
+    return this.queue.some(match);
+  }
+
+  /** Drop the held posts that match (an open item that was settled) without sending them. Returns how many. */
+  discardHeld(match: (entry: OutboxEntry) => boolean): number {
+    const gone = this.queue.filter((e) => e.held && match(e));
+    if (gone.length === 0) return 0;
+    this.queue = this.queue.filter((e) => !gone.includes(e));
+    for (const entry of gone) this.d.log.debug(`dropped held post ${entry.id}: ${entry.open ?? "it"} was settled`);
+    this.save();
+    return gone.length;
+  }
+
+  /** Check held posts now (after a restart). */
+  recheck(): void {
+    if (this.queue.some((e) => e.held)) this.checkSoon();
   }
 
   /**
@@ -103,14 +181,116 @@ export class Outbox {
     }
   }
 
-  /** Resolves when nothing is being sent right now (for tests and shutdown). */
+  /** Resolves when nothing is being sent or checked right now (for tests and shutdown). */
   async idle(): Promise<void> {
-    while (this.running) await this.running;
+    while (this.running || this.checking) {
+      await this.running;
+      await this.checking;
+    }
   }
 
   close(): void {
     this.closed = true;
     this.cancelRetry();
+    if (this.holdTimer !== null) this.d.clock.clearTimeout(this.holdTimer);
+    this.holdTimer = null;
+  }
+
+  // ---- holding posts while the user is at the computer ----------------------------------------
+
+  /** Check the held posts after any check under way, and every 30 seconds from now while any are held. */
+  private checkSoon(): void {
+    if (this.closed) return;
+    this.armHoldTimer();
+    if (this.checking) {
+      this.checkAgain = true;
+      return;
+    }
+    this.checking = this.checkLoop().finally(() => {
+      this.checking = null;
+    });
+  }
+
+  private async checkLoop(): Promise<void> {
+    do {
+      this.checkAgain = false;
+      try {
+        await this.checkHeld();
+      } catch (error) {
+        this.d.log.warn(`checking held posts failed: ${(error as Error).message}`);
+      }
+    } while (this.checkAgain && !this.closed);
+    if (this.queue.some((e) => e.held)) this.armHoldTimer();
+    else if (this.holdTimer !== null) {
+      this.d.clock.clearTimeout(this.holdTimer);
+      this.holdTimer = null;
+    }
+  }
+
+  private armHoldTimer(): void {
+    if (this.closed || this.holdTimer !== null) return;
+    // Each check sets the next before it runs, so they stay 30 seconds apart however long one takes.
+    this.holdTimer = this.d.clock.setTimeout(() => {
+      this.holdTimer = null;
+      this.checkSoon();
+    }, HOLD_CHECK_MS);
+  }
+
+  /** Read the idle time once, then send, keep or drop each held post, in order. */
+  private async checkHeld(): Promise<void> {
+    if (!this.queue.some((e) => e.held)) return;
+    const startedAt = this.d.clock.now();
+    const reading = this.d.readIdle ? await this.d.readIdle() : { at: this.d.clock.now(), idleMs: null };
+    const away = isAway(reading, this.d.awayMs?.() ?? DEFAULT_AWAY_MINUTES * 60_000);
+    const lastInput = lastInputAt(reading);
+    let changed = false;
+    // Posts made while ioreg ran wait for the next reading (`checkSoon` asks for one).
+    for (const entry of this.queue.filter((e) => e.held && (e.madeAt ?? e.at) <= startedAt)) {
+      if (this.closed) return;
+      if (entry.open !== undefined) {
+        if (!away) continue;
+        const open = this.d.isOpen ? await this.d.isOpen(entry) : true;
+        if (!entry.held || !this.queue.includes(entry)) continue; // let go or dropped meanwhile
+        if (open) this.release(entry);
+        else this.dropHeld(entry, `${entry.open} was settled`);
+        changed = true;
+        continue;
+      }
+      const madeAt = entry.madeAt ?? entry.at;
+      if (lastInput !== null && lastInput > (entry.inputAt ?? madeAt) + INPUT_SLACK_MS) {
+        this.dropHeld(entry, "the user was at the computer");
+        changed = true;
+        continue;
+      }
+      if (lastInput !== null && entry.inputAt === undefined) {
+        entry.inputAt = lastInput;
+        changed = true;
+      }
+      if (away) {
+        this.release(entry);
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    this.save();
+    this.kick();
+  }
+
+  /** Let a held post go. The 24 hours a post may wait for Discord count from now. */
+  private release(entry: OutboxEntry): void {
+    delete entry.held;
+    delete entry.inputAt;
+    entry.at = this.d.clock.now();
+    try {
+      this.d.onReleased?.(entry);
+    } catch (error) {
+      this.d.log.warn(`a released listener failed: ${(error as Error).message}`);
+    }
+  }
+
+  private dropHeld(entry: OutboxEntry, why: string): void {
+    this.queue = this.queue.filter((e) => e !== entry);
+    this.d.log.debug(`dropped held post ${entry.id}: ${why}`);
   }
 
   private cancelRetry(): void {
@@ -129,30 +309,35 @@ export class Outbox {
     writeFileAtomic(this.d.file, this.queue.map((e) => `${JSON.stringify(e)}\n`).join(""));
   }
 
-  /** Drop posts older than 24 hours, and queue one notice about them. */
+  /** Drop posts that waited for Discord longer than 24 hours, and queue one notice about them (held, like any notice). */
   private pruneStale(): void {
     const cutoff = this.d.clock.now() - OUTBOX_MAX_AGE_MS;
-    const stale = this.queue.filter((e) => e.at < cutoff);
+    const stale = this.queue.filter((e) => !e.held && e.at < cutoff);
     if (stale.length === 0) return;
-    this.queue = this.queue.filter((e) => e.at >= cutoff);
+    this.queue = this.queue.filter((e) => !stale.includes(e));
     this.d.log.warn(`dropped ${stale.length} posts older than 24 hours`);
     const control = this.d.controlChannelId();
     if (control !== null) {
       const times = stale.map((e) => e.at);
+      const now = this.d.clock.now();
       this.queue.push({
-        id: `notice-${this.d.clock.now().toString(36)}`,
-        at: this.d.clock.now(),
+        id: `notice-${now.toString(36)}`,
+        at: now,
         target: "control",
         content: droppedNotice(stale.length, Math.min(...times), Math.max(...times)),
+        held: true,
+        madeAt: now,
       });
+      this.checkSoon();
     }
     this.save();
   }
 
   private async drain(): Promise<void> {
     this.pruneStale();
-    while (this.online && !this.closed && this.queue.length > 0) {
-      const entry = this.queue[0]!;
+    while (this.online && !this.closed) {
+      const entry = this.queue.find((e) => !e.held);
+      if (entry === undefined) return;
       let channelId: string | null;
       try {
         channelId = await this.d.resolveChannel(entry);

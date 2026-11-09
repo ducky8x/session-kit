@@ -3,12 +3,16 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { RestClient } from "../src/discord/rest.ts";
 import { memoryLogger } from "../src/log.ts";
-import { Outbox, type OutboxEntry, OUTBOX_MAX_AGE_MS, formatTime } from "../src/outbound.ts";
+import { HOLD_CHECK_MS, Outbox, type OutboxEntry, OUTBOX_MAX_AGE_MS, formatTime } from "../src/outbound.ts";
+import { Presence } from "../src/presence.ts";
 import { FakeClock } from "./fakes/fake-clock.ts";
+import { type FakeIdle, fakeIdle } from "./fakes/fake-idle.ts";
+import { FakeProcessRunner } from "./fakes/fake-process.ts";
 import { type FakeChannel, FakeDiscordRest } from "./fakes/fake-rest.ts";
 import { tmpDir } from "./helpers/tmp.ts";
 import { waitFor } from "./helpers/wait.ts";
 
+const MINUTE = 60_000;
 const HOUR = 3_600_000;
 const TOKEN = "FAKE00000000000000000000.GabcDE.abcdefghijklmnopqrstuvwxyz0123456789AB";
 
@@ -27,6 +31,11 @@ interface Kit {
   unknown: string[];
   postedEvents: { sessionId: string | null; channelId: string }[];
   log: ReturnType<typeof memoryLogger>;
+  /** The user's keyboard and mouse, as ioreg reports them. */
+  idle: FakeIdle;
+  /** Open items still waiting for the user, by key. */
+  open: Set<string>;
+  released: string[];
 }
 
 async function setup(o: { file?: string; clock?: FakeClock; fetch?: typeof fetch } = {}): Promise<Kit & { fake: FakeDiscordRest }> {
@@ -47,6 +56,13 @@ async function setup(o: { file?: string; clock?: FakeClock; fetch?: typeof fetch
   const unknown: string[] = [];
   const postedEvents: { sessionId: string | null; channelId: string }[] = [];
   const file = o.file ?? `${tmpDir()}/outbox.jsonl`;
+  const runner = new FakeProcessRunner();
+  // Until a test says otherwise, the user has been away for an hour.
+  const idle = fakeIdle(runner, clock);
+  idle.idleFor(HOUR);
+  const presence = new Presence({ runner, clock, log });
+  const open = new Set<string>();
+  const released: string[] = [];
   const outbox = new Outbox({
     file,
     clock,
@@ -62,12 +78,27 @@ async function setup(o: { file?: string; clock?: FakeClock; fetch?: typeof fetch
       channels.set(entry.target, server.addChannel({ name: "remade" }).id);
     },
     onPosted: (entry, channelId) => postedEvents.push({ sessionId: entry.target === "control" ? null : entry.target, channelId }),
+    readIdle: () => presence.read(),
+    awayMs: () => 5 * MINUTE,
+    isOpen: async (entry) => open.has(entry.open!),
+    onReleased: (entry) => void released.push(entry.content),
   });
-  return { clock, outbox, file, control, channels, unknown, postedEvents, log, fake: server };
+  return { clock, outbox, file, control, channels, unknown, postedEvents, log, idle, open, released, fake: server };
 }
 
 function post(target: string, content: string): Omit<OutboxEntry, "id" | "at"> {
   return { target, content };
+}
+
+/** A post that waits while the user is at the computer. */
+function held(target: string, content: string, open?: string): Omit<OutboxEntry, "id" | "at"> {
+  return { target, content, held: true, ...(open === undefined ? {} : { open }) };
+}
+
+/** Let time pass and wait for what it started. */
+async function pass(kit: Kit, ms: number): Promise<void> {
+  await kit.clock.advance(ms);
+  await kit.outbox.idle();
 }
 
 describe("Outbox", () => {
@@ -241,5 +272,204 @@ describe("Outbox", () => {
       ["Claude needs your permission", { parse: [] }],
       ["plain, with <@42> typed by the session", { parse: [] }],
     ]);
+  });
+});
+
+describe("Outbox holding posts while the user is at the computer", () => {
+  async function online() {
+    const kit = await setup();
+    const channel = kit.fake.addChannel({ name: "work-cli" });
+    kit.channels.set("s1", channel.id);
+    kit.outbox.setOnline(true);
+    const sent = () => kit.fake.posted(channel.id).map((m) => m.content);
+    return { ...kit, channel, sent };
+  }
+
+  test("a held post made after 5 minutes without input goes out at once", async () => {
+    const kit = await online();
+    kit.idle.idleFor(5 * MINUTE);
+    kit.outbox.enqueue([held("s1", "away already")]);
+    await kit.outbox.idle();
+    expect(kit.sent()).toEqual(["away already"]);
+    expect(kit.outbox.size).toBe(0);
+    expect(kit.released).toEqual(["away already"]);
+  });
+
+  test("a post made while the user is active waits, then goes at the first check after 5 idle minutes", async () => {
+    const kit = await online();
+    kit.idle.touch();
+    const [entry] = kit.outbox.enqueue([held("s1", "finished the build")]);
+    await kit.outbox.idle();
+    expect(kit.sent()).toEqual([]);
+    expect(kit.outbox.heldCount).toBe(1);
+    expect(entry).toMatchObject({ held: true, madeAt: kit.clock.now(), inputAt: kit.clock.now() });
+    expect(HOLD_CHECK_MS).toBe(30_000);
+    await pass(kit, 5 * MINUTE - 1);
+    expect(kit.sent()).toEqual([]);
+    await pass(kit, 1);
+    expect(kit.sent()).toEqual(["finished the build"]);
+    expect(kit.outbox.size).toBe(0);
+    // Nothing is held, so ioreg is no longer read.
+    const reads = kit.idle.reads();
+    await pass(kit, 10 * MINUTE);
+    expect(kit.idle.reads()).toBe(reads);
+  });
+
+  test("a held post is dropped, with one debug line, once the user uses the computer after it was made", async () => {
+    const kit = await online();
+    kit.idle.touch();
+    kit.outbox.enqueue([held("s1", "done with step 1")]);
+    await pass(kit, 10_000);
+    kit.idle.touch();
+    await pass(kit, 20_000);
+    expect(kit.outbox.size).toBe(0);
+    expect(kit.log.lines.filter((l) => l.startsWith("debug"))).toEqual([expect.stringMatching(/^debug dropped held post \S+: the user was at the computer$/)]);
+    await pass(kit, HOUR);
+    expect(kit.sent()).toEqual([]);
+    expect(kit.released).toEqual([]);
+  });
+
+  test("held posts keep their order; a post that isn't held goes out at once", async () => {
+    const kit = await online();
+    kit.idle.touch();
+    kit.outbox.enqueue([held("s1", "first")]);
+    await pass(kit, MINUTE);
+    kit.outbox.enqueue([held("s1", "second, in two"), held("s1", "pieces")]);
+    kit.outbox.enqueue([post("s1", "a reply")]);
+    await kit.outbox.idle();
+    expect(kit.sent()).toEqual(["a reply"]);
+    await pass(kit, 4 * MINUTE);
+    expect(kit.sent()).toEqual(["a reply", "first", "second, in two", "pieces"]);
+  });
+
+  test("of the held posts, those made before the user's last input are dropped and later ones go", async () => {
+    const kit = await online();
+    kit.idle.touch();
+    kit.outbox.enqueue([held("s1", "made while active")]);
+    await pass(kit, 10_000);
+    kit.idle.touch();
+    await pass(kit, 10_000);
+    kit.outbox.enqueue([held("s1", "made after the last input")]);
+    await pass(kit, 10_000);
+    expect(kit.outbox.size).toBe(1);
+    // Five minutes after the last input, at 5:10, the next check (5:30) sends it.
+    await pass(kit, 4 * MINUTE + 50_000);
+    expect(kit.sent()).toEqual([]);
+    await pass(kit, 10_000);
+    expect(kit.sent()).toEqual(["made after the last input"]);
+  });
+
+  test("an unknown idle time counts as away", async () => {
+    const kit = await online();
+    kit.idle.touch();
+    kit.outbox.enqueue([held("s1", "held")]);
+    await kit.outbox.idle();
+    expect(kit.sent()).toEqual([]);
+    kit.idle.state.result = "failed";
+    await pass(kit, HOLD_CHECK_MS);
+    expect(kit.sent()).toEqual(["held"]);
+    kit.idle.state.result = "unreadable";
+    kit.outbox.enqueue([held("s1", "unreadable")]);
+    await kit.outbox.idle();
+    expect(kit.sent()).toEqual(["held", "unreadable"]);
+  });
+
+  test("an open item isn't dropped for activity: it goes out the first time the user is away, while still open", async () => {
+    const kit = await online();
+    kit.open.add("question:s1:q1");
+    kit.idle.touch();
+    kit.outbox.enqueue([held("s1", "the question", "question:s1:q1")]);
+    for (let i = 0; i < 20; i++) {
+      await pass(kit, MINUTE);
+      kit.idle.touch();
+    }
+    expect(kit.sent()).toEqual([]);
+    expect(kit.outbox.heldCount).toBe(1);
+    await pass(kit, 5 * MINUTE);
+    expect(kit.sent()).toEqual(["the question"]);
+  });
+
+  test("an open item settled meanwhile is dropped when the user is away, and never sent", async () => {
+    const kit = await online();
+    kit.open.add("prompt:s1");
+    kit.idle.touch();
+    kit.outbox.enqueue([held("s1", "Claude needs your permission", "prompt:s1")]);
+    await pass(kit, MINUTE);
+    kit.open.delete("prompt:s1");
+    await pass(kit, 5 * MINUTE);
+    expect(kit.sent()).toEqual([]);
+    expect(kit.outbox.size).toBe(0);
+  });
+
+  test("discardHeld drops matching held posts at once", async () => {
+    const kit = await online();
+    kit.idle.touch();
+    kit.outbox.enqueue([held("s1", "keep"), held("s1", "settled", "prompt:s1")]);
+    await kit.outbox.idle();
+    expect(kit.outbox.discardHeld((e) => e.open === "prompt:s1")).toBe(1);
+    expect(kit.outbox.heldCount).toBe(1);
+    await pass(kit, 5 * MINUTE);
+    expect(kit.sent()).toEqual(["keep"]);
+  });
+
+  test("held posts survive a restart, keep their order, and still drop on input made while the helper was down", async () => {
+    const file = `${tmpDir()}/outbox.jsonl`;
+    const first = await setup({ file });
+    first.idle.touch();
+    first.outbox.enqueue([held("s1", "one"), held("s1", "two")]);
+    await first.outbox.idle();
+    first.outbox.close();
+
+    const second = await setup({ file, clock: first.clock });
+    const channel = second.fake.addChannel({ name: "work-cli" });
+    second.channels.set("s1", channel.id);
+    second.idle.state.lastInputAt = first.idle.state.lastInputAt;
+    expect(second.outbox.heldCount).toBe(2);
+    second.outbox.setOnline(true);
+    second.outbox.recheck();
+    await second.outbox.idle();
+    expect(second.fake.posted(channel.id)).toHaveLength(0);
+    await pass(second, 5 * MINUTE);
+    expect(second.fake.posted(channel.id).map((m) => m.content)).toEqual(["one", "two"]);
+
+    const third = await setup({ file: `${tmpDir()}/outbox.jsonl`, clock: first.clock });
+    third.idle.touch();
+    third.outbox.enqueue([held("s1", "made before a restart")]);
+    await third.outbox.idle();
+    third.outbox.close();
+    await first.clock.advance(MINUTE);
+    const fourth = await setup({ file: third.file, clock: first.clock });
+    fourth.idle.touch(); // input while no helper ran
+    fourth.outbox.recheck();
+    await fourth.outbox.idle();
+    expect(fourth.outbox.size).toBe(0);
+  });
+
+  test("the notice about dropped posts is held too while the user is at the computer", async () => {
+    const kit = await setup();
+    kit.channels.set("s1", kit.fake.addChannel({ name: "work-cli" }).id);
+    kit.outbox.enqueue([post("s1", "old")]);
+    await kit.clock.advance(OUTBOX_MAX_AGE_MS + 1);
+    kit.idle.touch();
+    kit.outbox.setOnline(true);
+    await kit.outbox.idle();
+    expect(kit.fake.posted(kit.control.id)).toHaveLength(0);
+    expect(kit.outbox.heldCount).toBe(1);
+    await pass(kit, 5 * MINUTE);
+    expect(kit.fake.posted(kit.control.id).map((m) => m.content)).toEqual([expect.stringMatching(/^1 post from .* was dropped while offline\.$/)]);
+  });
+
+  test("a post held for longer than 24 hours (an open item) isn't counted as dropped while offline", async () => {
+    const kit = await online();
+    kit.open.add("question:s1:q1");
+    kit.idle.touch();
+    kit.outbox.enqueue([held("s1", "the question", "question:s1:q1")]);
+    for (let i = 0; i < 26; i++) {
+      await pass(kit, HOUR);
+      kit.idle.touch();
+    }
+    await pass(kit, 5 * MINUTE);
+    expect(kit.sent()).toEqual(["the question"]);
+    expect(kit.fake.posted(kit.control.id)).toHaveLength(0);
   });
 });
