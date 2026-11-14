@@ -152,7 +152,13 @@ export const COMMANDS: Record<string, Command> = {
       ...(deps.releaseBaseUrl ? { releaseBaseUrl: deps.releaseBaseUrl } : {}),
     }),
   listen: (args, deps) =>
-    listenCommand(args, { paths: pathsFor(deps.home), out: deps.out, err: deps.err, call: deps.call ?? callHelper }),
+    listenCommand(args, {
+      paths: pathsFor(deps.home),
+      out: deps.out,
+      err: deps.err,
+      call: deps.call ?? callHelper,
+      clock: deps.clock ?? realClock,
+    }),
   daemon: (_args, deps) => (deps.runDaemon ? deps.runDaemon() : runDaemon({ home: deps.home, env: deps.env })),
   hook: async (args, deps) => {
     const hook = HOOKS[args[0] ?? ""];
