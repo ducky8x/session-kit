@@ -1,12 +1,26 @@
 import { describe, expect, test } from "bun:test";
+import { sessionFeatures } from "../src/features.ts";
 import { REPLIES } from "../src/inbound.ts";
+import { LISTEN_GRACE_MS, LISTEN_RETRY_MS } from "../src/listen.ts";
 import { BETWEEN_LISTENS_MS } from "../src/listeners.ts";
+import type { FakeClock } from "./fakes/fake-clock.ts";
 import { GUILD_ID } from "./fakes/fake-rest.ts";
 import { inboundKit } from "./helpers/inbound-kit.ts";
 import { waitFor } from "./helpers/wait.ts";
 
 function stopHookInput(sessionId: string): string {
   return JSON.stringify({ session_id: sessionId, hook_event_name: "Stop", stop_hook_active: false });
+}
+
+/** Move the fake clock a retry at a time until `running` ends, while the real socket does its part. */
+async function untilDone<T>(clock: FakeClock, running: Promise<T>): Promise<T> {
+  let done = false;
+  void running.finally(() => (done = true));
+  await waitFor(async () => {
+    if (!done) await clock.advance(LISTEN_RETRY_MS);
+    return done;
+  }, 10_000);
+  return running;
 }
 
 describe("delivery", () => {
@@ -182,11 +196,36 @@ describe("sk-discord listen", () => {
     expect(JSON.parse(r.out)).toMatchObject({ type: "text", text: "queued text", queued: true });
   });
 
-  test("with the helper down it prints helper-down and exits 2", async () => {
+  test("with the helper down it keeps trying for 3 minutes, then prints helper-down and exits 2", async () => {
     const { daemonKit } = await import("./helpers/daemon-kit.ts");
     const k = await daemonKit({ noStart: true });
-    const r = await k.cli(["listen", "--session", "abc"]);
+    const start = k.clock.now();
+    const r = await untilDone(k.clock, k.cli(["listen", "--session", "abc"]));
     expect(r).toEqual({ code: 2, out: '{"type":"helper-down"}\n', err: "" });
+    expect(k.clock.now() - start).toBeGreaterThanOrEqual(LISTEN_GRACE_MS);
+  });
+
+  test("a listener rides out a helper restart and gets what arrived meanwhile", async () => {
+    const { daemonKit } = await import("./helpers/daemon-kit.ts");
+    const k = await daemonKit();
+    await k.register("eeee5555");
+    let done = false;
+    const running = k.cli(["listen", "--session", "eeee5555"]);
+    void running.finally(() => (done = true));
+    await waitFor(() => sessionFeatures(k.daemon).hub.isListening("eeee5555"));
+
+    await k.daemon.stop();
+    await k.clock.advance(10_000);
+    expect(done).toBe(false);
+
+    // The new helper reads the same session list, with a message that came in while nothing listened.
+    const restarted = await daemonKit({ home: k.home, noStart: true });
+    restarted.daemon.sessions.pushInbox("eeee5555", { type: "text", id: "m9", text: "still there?", at: 1 });
+    await restarted.daemon.start();
+    const r = await untilDone(k.clock, running);
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out)).toEqual({ type: "text", id: "m9", text: "still there?", at: 1, queued: true });
+    expect(r.err).toBe("");
   });
 
   test("with Discord off it prints disabled", async () => {
