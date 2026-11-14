@@ -125,6 +125,8 @@ Posts wait while you're at the computer. They go out once you've gone 5 minutes 
 
 On battery power the helper keeps no live connection to Discord. It checks for new messages every 5 minutes instead, so what you type in a channel can take up to 5 minutes to reach the session; posts from sessions don't wait for these checks. When the Mac is back on AC power, it reconnects and picks up anything sent since the last check. To check more or less often, set `batteryPollMinutes` in `~/.claude/session-kit/discord/config.json` (at least 1), then run `/discord on`.
 
+When the helper restarts or reconnects to Discord, after an update for example, what you typed in the meantime still reaches the session. Messages more than 15 minutes old are skipped, since the session has likely moved on.
+
 `/discord status` shows whether the helper is connected and what to fix if it isn't. `/discord off` stops new channels and posts but keeps the setup, so `/discord on` turns it back on. After a plugin update, the session-start hook updates the helper to the plugin's version by itself.
 
 The helper is `~/.claude/session-kit/bin/sk-discord`. Its settings, session list and log are in `~/.claude/session-kit/discord/`, and a LaunchAgent, `~/Library/LaunchAgents/io.github.ducky8x.session-kit.discord.plist`, starts it at login.
