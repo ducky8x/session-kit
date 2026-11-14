@@ -47,7 +47,15 @@ export interface DaemonDeps {
   which?: (command: string, path?: string) => string | null;
   /** Features that add their own socket ops and hooks (see `extensions.ts`). */
   extensions?: readonly ((daemon: Daemon) => void)[];
+  /** Takes the place of `CATCH_UP_MAX_AGE_MS` (for tests). */
+  catchUpMaxAgeMs?: number;
 }
+
+/**
+ * After a new gateway session, the helper reads what came in while it had none. A message older than this is
+ * skipped: it's too late to act on, and the session has likely moved on.
+ */
+export const CATCH_UP_MAX_AGE_MS = 15 * MINUTE_MS;
 
 /** A MESSAGE_CREATE event's data, as far as the helper reads it. */
 export interface DiscordMessage extends ChannelMessage {
@@ -277,6 +285,7 @@ export class Daemon {
       prepare: () => this.prepareCheck(),
       // Discord leaves the server out of the messages it lists; the gateway's copy has it.
       deliver: (message) => this.onMessageCreate({ ...message, guild_id: this.config.guildId }),
+      handled: (messageId) => this.handled.has(messageId),
       onUnknownChannel: (channelId) => this.channels.onChannelEvent("CHANNEL_DELETE", { id: channelId }),
       onRejected: () => {
         this.problem = "token-rejected";
@@ -516,7 +525,8 @@ export class Daemon {
     } else {
       const wasChecking = this.poller.running;
       const since = this.cursors.snapshot();
-      this.poller.stop();
+      // A catch-up under way (see READY) carries on.
+      if (wasChecking) this.poller.stop();
       const state = this.gateway.state;
       if (restart || (state !== "connected" && state !== "connecting")) {
         this.gateway.stop();
@@ -588,9 +598,15 @@ export class Daemon {
           this.notInServer = !data.guilds.some((g: { id?: unknown }) => g?.id === guildId);
           if (this.notInServer) this.deps.log.warn("the bot is not in the configured server");
         }
-        // A new gateway session may have missed messages. Rather than hand those on late, at the next check on
-        // battery power, the checks start again from the newest messages.
+        // READY starts a new gateway session; one that resumes gets RESUMED instead, and Discord sends it the
+        // events it missed. A new session brings only messages sent from now on, so what came in before (while
+        // the helper was down, or the gateway away) is read from each channel's cursor, as a check on battery
+        // power reads it. Messages older than CATCH_UP_MAX_AGE_MS are skipped. The cursors start over: each is
+        // set again once its channel is read, so a channel with no cursor, or whose read fails, starts from its
+        // newest message.
+        const from = this.catchUpFrom();
         this.cursors.clear();
+        if (from.size > 0) void this.poller.catchUp(from, this.deps.catchUpMaxAgeMs ?? CATCH_UP_MAX_AGE_MS);
         this.track(this.channels.onConnected());
         return;
       }
@@ -615,8 +631,8 @@ export class Daemon {
   }
 
   /**
-   * A message in some channel, from the gateway or from a check on battery power. Each message is handed on
-   * once, however many times it comes, and moves the cursor of a channel the helper reads.
+   * A message in some channel, from the gateway, a check on battery power or a catch-up. Each message is handed
+   * on once, however many times it comes, and moves the cursor of a channel the helper reads.
    */
   private onMessageCreate(data: any): void {
     if (!data || data.guild_id !== this.config.guildId || typeof data.channel_id !== "string") return;
@@ -665,9 +681,26 @@ export class Daemon {
     const known = new Set(linked.map((e) => e.channelId!));
     if (control !== null) known.add(control);
     this.cursors.retain(known);
-    const read = new Set(linked.filter((e) => !e.archived).map((e) => e.channelId!));
+    return this.watchedChannels();
+  }
+
+  /** The channels a check reads: every linked session channel that isn't archived, and `#session-kit`. */
+  private watchedChannels(): string[] {
+    const read = new Set(this.sessions.all().flatMap((e) => (e.channelId !== null && !e.archived ? [e.channelId] : [])));
+    const control = this.config.controlChannelId;
     if (control !== null) read.add(control);
     return [...read];
+  }
+
+  /** Where a catch-up starts: the cursor of each channel a check reads, for those that have one. */
+  private catchUpFrom(): Map<string, string> {
+    const from = new Map<string, string>();
+    if (this.config.guildId === null || this.notInServer) return from;
+    for (const channelId of this.watchedChannels()) {
+      const cursor = this.cursors.get(channelId);
+      if (cursor !== undefined) from.set(channelId, cursor);
+    }
+    return from;
   }
 
   private async onMessage(message: DiscordMessage): Promise<void> {

@@ -58,6 +58,12 @@ interface HeaderRule {
   times: number;
 }
 
+interface Hold {
+  method?: string;
+  path: RegExp | string;
+  released: Promise<void>;
+}
+
 function matches(rule: { method?: string; path: RegExp | string }, method: string, path: string): boolean {
   if (rule.method && rule.method !== method) return false;
   return typeof rule.path === "string" ? rule.path === path : rule.path.test(path);
@@ -78,6 +84,7 @@ export class FakeDiscordRest {
   maxPerCategory = 50;
   private overrides: Override[] = [];
   private headerRules: HeaderRule[] = [];
+  private holds: Hold[] = [];
   private nextId = 1n;
   private server: ReturnType<typeof Bun.serve> | null = null;
 
@@ -123,6 +130,17 @@ export class FakeDiscordRest {
   /** Answer the next `times` matching requests with this status and body instead of handling them. */
   failNext(o: { method?: string; path: RegExp | string; status: number; body?: unknown; headers?: Record<string, string>; times?: number }): void {
     this.overrides.push({ ...o, times: o.times ?? 1 });
+  }
+
+  /**
+   * Keep the answer to the next matching request until the returned function is called, as a slow Discord
+   * would. The request is recorded at once; the answer is worked out when it's let go.
+   */
+  holdNext(o: { method?: string; path: RegExp | string }): () => void {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    this.holds.push({ ...o, released });
+    return release;
   }
 
   /** Add these headers to the next `times` matching successful responses (rate-limit buckets). */
@@ -202,6 +220,12 @@ export class FakeDiscordRest {
       authorization: req.headers.get("authorization"),
       userAgent: req.headers.get("user-agent"),
     });
+
+    const hold = this.holds.find((h) => matches(h, method, path));
+    if (hold) {
+      this.holds = this.holds.filter((h) => h !== hold);
+      await hold.released;
+    }
 
     const override = this.overrides.find((o) => o.times > 0 && matches(o, method, path));
     if (override) {

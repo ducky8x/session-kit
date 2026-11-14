@@ -11,6 +11,18 @@ export const BATTERY_OUTPUT =
 /** Someone in the server who isn't the owner. */
 export const STRANGER = "555555555555555555";
 
+/** Discord's epoch, 2015-01-01: a message id holds the milliseconds since then above its low 22 bits. */
+const DISCORD_EPOCH_MS = 1_420_070_400_000;
+let idCount = 0n;
+
+/**
+ * An id like the one Discord gives a message sent at `ms`, so its age shows in the id. Ids made for the same
+ * moment still differ, and later calls give later ids.
+ */
+export function idAt(ms: number): string {
+  return String((BigInt(ms - DISCORD_EPOCH_MS) << 22n) + (idCount++ % 4096n));
+}
+
 /**
  * A daemon on fakes whose `pmset -g ps` says what `power.output` holds: battery power unless `power` says AC.
  * The fake `claude` CLI lists the session `SID` as open in a terminal, so messages for it wait in its inbox
