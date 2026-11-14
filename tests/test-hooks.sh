@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Tests for the session-kit hooks. Run with: bash tests/test-hooks.sh
 # Each test runs a hook with a throwaway HOME and fake stdin JSON, so the
-# real ~/.claude is never read or written. Needs python3 to check JSON.
+# real ~/.claude is never read or written. Git runs with that HOME and
+# without the system config, so the real git config and global ignore file
+# are never read or written either. Needs python3 to check JSON, and git.
 
 set -u
 
@@ -10,6 +12,7 @@ SESSION_START="$ROOT/hooks/session-start.sh"
 SUBAGENT_START="$ROOT/hooks/subagent-start.sh"
 DISCORD="$ROOT/hooks/discord.sh"
 GUARD="$ROOT/hooks/autonomous-guard.sh"
+WORKFLOW_IGNORE="$ROOT/hooks/workflow-ignore.sh"
 HOOKS_JSON="$ROOT/hooks/hooks.json"
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/session-kit-test.XXXXXX") || exit 1
@@ -27,6 +30,7 @@ TEST_LOCALE=C
 TEST_UNAME=Linux
 TEST_PLUGIN_ROOT=""  # CLAUDE_PLUGIN_ROOT for the hooks; empty means unset
 TEST_ENTRYPOINT=""   # CLAUDE_CODE_ENTRYPOINT for the hooks
+TEST_XDG=""          # XDG_CONFIG_HOME for the hooks; empty means unset
 
 # A UTF-8 locale, to check the hooks under the locale a user usually has.
 UTF8_LOCALE=$(locale -a 2>/dev/null | grep -i -x -m 1 -e 'C.UTF-8' -e 'C.utf8' -e 'en_US.UTF-8' -e 'en_US.utf8')
@@ -44,12 +48,17 @@ state_dir() { printf '%s' "$H/.claude/session-kit/state"; }
 rules_file() { printf '%s' "$H/.claude/session-kit/rules.md"; }
 
 # run_hook <script> <stdin text> [hook arguments...]
+# Git sees only the test HOME's config (no system config, no XDG_CONFIG_HOME
+# unless TEST_XDG sets one) and finds no repo above $TMP_ROOT. The hook's
+# stderr goes to $TMP_ROOT/stderr.
 run_hook() {
   local script=$1 input=$2
   shift 2
   OUT=$(printf '%s' "$input" | env -i HOME="$H" PATH="$PATH" LC_ALL="$TEST_LOCALE" \
     SK_DISCORD_UNAME="$TEST_UNAME" CLAUDE_PLUGIN_ROOT="$TEST_PLUGIN_ROOT" \
-    CLAUDE_CODE_ENTRYPOINT="$TEST_ENTRYPOINT" "$script" "$@" 2>/dev/null)
+    CLAUDE_CODE_ENTRYPOINT="$TEST_ENTRYPOINT" XDG_CONFIG_HOME="$TEST_XDG" \
+    GIT_CONFIG_NOSYSTEM=1 GIT_CEILING_DIRECTORIES="$TMP_ROOT" \
+    "$script" "$@" 2>"$TMP_ROOT/stderr")
   STATUS=$?
 }
 
@@ -84,7 +93,7 @@ SETUP_LINE="Discord: turned on, but the helper isn't installed."
 UPDATE_LINE="Updating the Discord helper to"
 
 echo "== files"
-for f in "$SESSION_START" "$SUBAGENT_START" "$DISCORD" "$GUARD"; do
+for f in "$SESSION_START" "$SUBAGENT_START" "$DISCORD" "$GUARD" "$WORKFLOW_IGNORE"; do
   if [ -x "$f" ]; then pass "$(basename "$f") is executable"; else fail "$(basename "$f") is executable"; fi
 done
 if python3 - "$HOOKS_JSON" <<'PY' 2>/dev/null
@@ -861,6 +870,290 @@ expect_empty "no stdin at all prints nothing"
 OUT=$(printf '%s' "$input" | env -i PATH="$PATH" "$GUARD" 2>/dev/null); STATUS=$?
 expect_status0 "unset HOME exits 0"
 expect_empty "unset HOME prints nothing"
+
+WI_HEADER="# session-kit: workflow files"
+TRACKED_LINE="Workflow files tracked in this repo:"
+LOOSE_LINE="Workflow files not ignored in this repo:"
+ignore_list() { printf '%s' "$H/.claude/session-kit/ignore"; }
+global_ignore() { printf '%s' "$H/.config/git/ignore"; }
+added_line() { printf 'session-kit added %s from ~/.claude/session-kit/ignore to the global git ignore file, %s.' "$1" "$2"; }
+# write_list <text>: the ignore list, written as given
+write_list() { mkdir -p "$(dirname "$(ignore_list)")"; printf '%s' "$1" > "$(ignore_list)"; }
+# write_file <path> <text>: a file holding exactly <text>
+write_file() { mkdir -p "$(dirname "$1")"; printf '%s' "$2" > "$1"; }
+# expect_bytes <name> <file> <text>: the file holds exactly <text>
+expect_bytes() {
+  printf '%s' "$3" > "$TMP_ROOT/expected-bytes"
+  if [ -f "$2" ] && cmp -s "$TMP_ROOT/expected-bytes" "$2"; then pass "$1"; else fail "$1" "$2: $(od -c "$2" 2>/dev/null | head -n 8)"; fi
+}
+expect_no_stderr() { if [ -s "$TMP_ROOT/stderr" ]; then fail "$1" "stderr: $(cat "$TMP_ROOT/stderr")"; else pass "$1"; fi; }
+expect_lines() { # <name> <count>: the output has exactly <count> lines
+  local n=0
+  [ -z "$OUT" ] || n=$(printf '%s\n' "$OUT" | wc -l | tr -d ' ')
+  if [ "$n" -eq "$2" ]; then pass "$1"; else fail "$1" "$n lines: $OUT"; fi
+}
+# tgit <git arguments...>: git for setting up test repos, with the same
+# isolation as run_hook and a fixed author.
+tgit() {
+  env -i HOME="$H" PATH="$PATH" GIT_CONFIG_NOSYSTEM=1 GIT_CEILING_DIRECTORIES="$TMP_ROOT" \
+    GIT_AUTHOR_NAME=Test GIT_AUTHOR_EMAIL=test@example.com \
+    GIT_COMMITTER_NAME=Test GIT_COMMITTER_EMAIL=test@example.com git "$@"
+}
+# make_repo <dir> <file...>: a repo at <dir> with one commit that tracks each
+# <file>. A file that doesn't exist yet is created.
+make_repo() {
+  local dir=$1 f
+  shift
+  mkdir -p "$dir"
+  tgit init -q "$dir" >/dev/null 2>&1
+  for f in "$@"; do
+    [ -e "$dir/$f" ] || write_file "$dir/$f" $'x\n'
+  done
+  tgit -C "$dir" add -f -- "$@" >/dev/null 2>&1
+  tgit -C "$dir" commit -q -m init >/dev/null 2>&1
+}
+wi_input() { printf '{"session_id":"s-w","transcript_path":"/tmp/t.jsonl","cwd":"%s","hook_event_name":"SessionStart","source":"%s"}' "$1" "${2:-startup}"; }
+
+echo "== workflow-ignore: no ignore list"
+new_home wnone
+make_repo "$H/repo" .agentcontext
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H/repo")"
+expect_status0 "no ignore list exits 0"
+expect_empty "no ignore list prints nothing, even in a repo that tracks .agentcontext"
+expect_no_file "no ignore list creates no global ignore file" "$H/.config"
+expect_no_file "no ignore list writes no git config" "$H/.gitconfig"
+
+echo "== workflow-ignore: global ignore file"
+new_home wcreate
+write_list $'# Workflow files\n.agentcontext\n\n  CLAUDE.md  \r\n.task/\n.agentcontext\n'
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H")"
+expect_status0 "a new global ignore file exits 0"
+expect_line "a new global ignore file gives one line" "$(added_line "3 patterns" "~/.config/git/ignore")"
+expect_lines "a new global ignore file gives only that line" 1
+expect_bytes "~/.config/git/ignore is created with the header and the patterns" "$(global_ignore)" "$WI_HEADER"$'\n.agentcontext\nCLAUDE.md\n.task/\n'
+expect_no_file "the global ignore file is added without writing git config" "$H/.gitconfig"
+expect_no_file "the lock is released" "$H/.claude/session-kit/ignore.lock"
+expect_no_stderr "a new global ignore file writes nothing to stderr"
+for src in startup compact resume; do
+  run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H" "$src")"
+  expect_empty "a later run ($src) prints nothing"
+done
+expect_bytes "a later run leaves the file as it was" "$(global_ignore)" "$WI_HEADER"$'\n.agentcontext\nCLAUDE.md\n.task/\n'
+
+new_home wxdg
+TEST_XDG="$H/xdg"
+write_list $'.agentcontext\n'
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H")"
+TEST_XDG=""
+expect_line "XDG_CONFIG_HOME moves the default file" "$(added_line "1 pattern" "~/xdg/git/ignore")"
+expect_bytes "the file under XDG_CONFIG_HOME gets the pattern" "$H/xdg/git/ignore" "$WI_HEADER"$'\n.agentcontext\n'
+expect_no_file "with XDG_CONFIG_HOME set, ~/.config is left alone" "$H/.config"
+
+new_home wcustom
+tgit config --global core.excludesFile '~/x/ignore'
+cp "$H/.gitconfig" "$TMP_ROOT/gitconfig-before"
+write_file "$H/x/ignore" $'*.log\n.DS_Store \t\n# mine\n\n'
+write_list $'.agentcontext\n.DS_Store\n'
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H")"
+expect_line "core.excludesFile set to ~/x/ignore: that file is named" "$(added_line "1 pattern" "~/x/ignore")"
+expect_bytes "core.excludesFile: existing lines are kept and the block follows them" "$H/x/ignore" $'*.log\n.DS_Store \t\n# mine\n\n'"$WI_HEADER"$'\n.agentcontext\n'
+expect_no_file "core.excludesFile: ~/.config/git/ignore isn't created" "$(global_ignore)"
+if cmp -s "$TMP_ROOT/gitconfig-before" "$H/.gitconfig"; then pass "git config is left unchanged"; else fail "git config is left unchanged"; fi
+
+new_home wpresent
+write_list $'.agentcontext\nCLAUDE.md\n'
+write_file "$(global_ignore)" $'CLAUDE.md  \n*.log\n.agentcontext\t\n'
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H")"
+expect_status0 "patterns already present exits 0"
+expect_empty "patterns already present (trailing whitespace aside) print nothing"
+expect_bytes "patterns already present leave the file unchanged" "$(global_ignore)" $'CLAUDE.md  \n*.log\n.agentcontext\t\n'
+
+new_home wnonl
+write_list $'.agentcontext\n'
+write_file "$(global_ignore)" '*.log'
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H")"
+expect_bytes "a file without a final newline gets one before the block" "$(global_ignore)" $'*.log\n\n'"$WI_HEADER"$'\n.agentcontext\n'
+
+new_home wheader
+write_list $'.agentcontext\nCLAUDE.md\n.task/\n'
+write_file "$(global_ignore)" $'*.log\n\n'"$WI_HEADER"$'\n.agentcontext\n\n# mine\n*.tmp'
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H")"
+expect_line "an existing header: the count covers only the new patterns" "$(added_line "2 patterns" "~/.config/git/ignore")"
+expect_bytes "an existing header gets the new patterns under it, and later lines stay as they were" "$(global_ignore)" $'*.log\n\n'"$WI_HEADER"$'\n.agentcontext\nCLAUDE.md\n.task/\n\n# mine\n*.tmp'
+write_file "$(global_ignore)" $'*.log\n\n'"$WI_HEADER"$'\n.agentcontext'
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H")"
+expect_bytes "a header block at the end of the file is extended, not repeated" "$(global_ignore)" $'*.log\n\n'"$WI_HEADER"$'\n.agentcontext\nCLAUDE.md\n.task/\n'
+
+new_home wlink
+write_file "$H/dotfiles/gitignore" $'*.log\n'
+ln -s "$H/dotfiles/gitignore" "$H/.gitignore_global"
+tgit config --global core.excludesFile '~/.gitignore_global'
+write_list $'.agentcontext\n'
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H")"
+if [ -L "$H/.gitignore_global" ]; then pass "a symlinked global ignore file stays a symlink"; else fail "a symlinked global ignore file stays a symlink"; fi
+expect_bytes "a symlinked global ignore file's target gets the block" "$H/dotfiles/gitignore" $'*.log\n\n'"$WI_HEADER"$'\n.agentcontext\n'
+
+new_home wlock
+write_list $'.agentcontext\n'
+mkdir -p "$H/.claude/session-kit/ignore.lock"
+SECONDS=0
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H")"
+elapsed=$SECONDS
+expect_status0 "a held lock exits 0"
+expect_empty "a held lock: the update is skipped quietly"
+expect_no_file "a held lock: nothing is written" "$(global_ignore)"
+if [ "$elapsed" -le 3 ]; then pass "a held lock is given up on quickly (${elapsed}s)"; else fail "a held lock is given up on quickly" "${elapsed}s"; fi
+touch -t 202001010000 "$H/.claude/session-kit/ignore.lock"
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H")"
+expect_line "a lock over a minute old is taken over" "$(added_line "1 pattern" "~/.config/git/ignore")"
+expect_no_file "the stale lock is gone afterward" "$H/.claude/session-kit/ignore.lock"
+
+new_home wrace
+write_list $'.agentcontext\nCLAUDE.md\n.task/\n'
+for i in 1 2 3 4 5 6; do
+  printf '%s' "$(wi_input "$H")" | env -i HOME="$H" PATH="$PATH" GIT_CONFIG_NOSYSTEM=1 \
+    GIT_CEILING_DIRECTORIES="$TMP_ROOT" "$WORKFLOW_IGNORE" > "$TMP_ROOT/race-$i" 2>/dev/null &
+done
+wait
+expect_bytes "six runs at once add each pattern once" "$(global_ignore)" "$WI_HEADER"$'\n.agentcontext\nCLAUDE.md\n.task/\n'
+if [ "$(cat "$TMP_ROOT"/race-* | grep -c -F 'session-kit added')" -eq 1 ]; then pass "six runs at once: only the one that wrote says so"; else fail "six runs at once: only the one that wrote says so" "$(cat "$TMP_ROOT"/race-*)"; fi
+
+new_home wempty
+tgit config --global core.excludesFile ''
+write_list $'.agentcontext\n'
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H")"
+expect_status0 "an empty core.excludesFile exits 0"
+expect_empty "an empty core.excludesFile (global ignore turned off) is left alone"
+expect_no_file "an empty core.excludesFile: nothing is written" "$(global_ignore)"
+
+echo "== workflow-ignore: the current repo"
+new_home wtracked
+make_repo "$H/repo" .agentcontext .task/a.md README.md sub/keep.txt docs/notes-1.md
+write_list $'.agentcontext\n.task/\nCLAUDE.md\nnotes-*.md\n'
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H/repo")"
+expect_status0 "a repo with tracked workflow files exits 0"
+expect_has "the global file is still updated" "$(added_line "4 patterns" "~/.config/git/ignore")"
+expect_has "tracked .agentcontext and .task/a.md are both named, and so is a wildcard match" "$TRACKED_LINE .agentcontext, .task/a.md, docs/notes-1.md."
+expect_has "the tracked line says how to untrack them" "git rm --cached"
+expect_lacks "files that match no pattern aren't named" "README.md"
+expect_lacks "tracked files aren't also called not ignored" "$LOOSE_LINE"
+expect_lines "the global line and the tracked line" 2
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H/repo/sub")"
+expect_has "from a subfolder, tracked files are named from the repo's top" "$TRACKED_LINE .agentcontext, .task/a.md, docs/notes-1.md."
+expect_lines "a second run gives only the tracked line" 1
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H/repo/.git")"
+expect_status0 "cwd inside .git exits 0"
+expect_empty "cwd inside .git prints nothing"
+
+new_home wmany
+make_repo "$H/repo" .task/01.md .task/02.md .task/03.md .task/04.md .task/05.md .task/06.md .task/07.md .task/08.md .task/09.md .task/10.md .task/11.md .task/12.md
+write_list $'.task/\n'
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H/repo")"
+expect_has "a long list stops after 10 names" ".task/09.md, .task/10.md and 2 more."
+expect_lacks "names past the tenth are left out" ".task/11.md"
+
+new_home wloose
+write_file "$H/repo/.gitignore" $'!CLAUDE.md\n'
+make_repo "$H/repo" .gitignore
+write_file "$H/repo/CLAUDE.md" $'notes\n'
+write_file "$H/repo/sub/CLAUDE.md" $'notes\n'
+write_file "$H/repo/.notes/n.md" $'notes\n'
+write_file "$H/repo/.agentcontext" $'brief\n'
+write_file "$H/repo/.task" $'a file, not a folder\n'
+write_list $'.agentcontext\nCLAUDE.md\n.notes/\n.task/\n'
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H/repo")"
+expect_status0 "a repo that re-includes CLAUDE.md exits 0"
+expect_has "an untracked CLAUDE.md that the repo re-includes is named" "$LOOSE_LINE CLAUDE.md."
+expect_lacks "ignored workflow files aren't named" ".notes"
+expect_lacks "a file named like a folder pattern isn't named" ".task"
+expect_lacks "nothing is called tracked" "$TRACKED_LINE"
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H/repo/sub")"
+expect_has "from a subfolder, its own CLAUDE.md is named too" "$LOOSE_LINE CLAUDE.md, sub/CLAUDE.md."
+
+new_home wfolder
+write_file "$H/repo/.gitignore" $'!.notes/\n'
+make_repo "$H/repo" .gitignore
+write_file "$H/repo/.notes/n.md" $'notes\n'
+write_list $'.notes/\n'
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H/repo")"
+expect_has "a folder the repo re-includes is named with a slash" "$LOOSE_LINE .notes/."
+
+new_home wclean
+make_repo "$H/repo" README.md
+write_file "$H/repo/.agentcontext" $'brief\n'
+write_file "$H/repo/.task/a.md" $'spec\n'
+write_list $'.agentcontext\n.task/\nCLAUDE.md\n'
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H/repo")"
+expect_lines "a clean repo: only the global line on the first run" 1
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H/repo")"
+expect_empty "a clean repo with the global file up to date prints nothing"
+
+new_home wspace
+make_repo "$H/untitled folder" .agentcontext
+write_file "$H/untitled folder/CLAUDE.md" $'notes\n'
+write_file "$H/untitled folder/.gitignore" $'!CLAUDE.md\n'
+write_list $'.agentcontext\nCLAUDE.md\n'
+run_hook "$WORKFLOW_IGNORE" "$(wi_input "$H/untitled folder")"
+expect_status0 "a repo with a space in its path exits 0"
+expect_has "a repo with a space in its path: tracked files are named" "$TRACKED_LINE .agentcontext."
+expect_has "a repo with a space in its path: files not ignored are named" "$LOOSE_LINE CLAUDE.md."
+expect_no_stderr "a repo with a space in its path writes nothing to stderr"
+
+echo "== workflow-ignore: not a repo, bad input, no git"
+new_home wplain
+write_list $'.agentcontext\n'
+write_file "$(global_ignore)" "$WI_HEADER"$'\n.agentcontext\n'
+mkdir -p "$H/plain folder"
+for dir in "$H/plain folder" "$H/missing"; do
+  run_hook "$WORKFLOW_IGNORE" "$(wi_input "$dir")"
+  expect_status0 "cwd $(basename "$dir") exits 0"
+  expect_empty "cwd $(basename "$dir") prints nothing"
+  expect_no_stderr "cwd $(basename "$dir") writes nothing to stderr"
+done
+rm -f "$(global_ignore)"
+for input in "" "not json at all {" '{"session_id":"s-w","cwd":' '{"session_id":"s-w","source":"startup"}'; do
+  run_hook "$WORKFLOW_IGNORE" "$input"
+  expect_status0 "bad input '$input' exits 0"
+  expect_empty "bad input '$input' prints nothing"
+done
+expect_no_file "bad input writes nothing" "$(global_ignore)"
+OUT=$(env -i HOME="$H" PATH="$PATH" GIT_CONFIG_NOSYSTEM=1 "$WORKFLOW_IGNORE" </dev/null 2>/dev/null); STATUS=$?
+expect_status0 "no stdin at all exits 0"
+expect_empty "no stdin at all prints nothing"
+OUT=$(printf '%s' "$(wi_input "$H")" | env -i PATH="$PATH" GIT_CONFIG_NOSYSTEM=1 "$WORKFLOW_IGNORE" 2>/dev/null); STATUS=$?
+expect_status0 "unset HOME exits 0"
+expect_empty "unset HOME prints nothing"
+
+NOGIT_BIN="$TMP_ROOT/nogit-bin"
+mkdir -p "$NOGIT_BIN"
+for tool in bash cat tr sed awk head tail mkdir rmdir rm find mktemp wc sleep dirname grep cut od cmp; do
+  p=$(command -v "$tool") && ln -sf "$p" "$NOGIT_BIN/$tool"
+done
+new_home wnogit
+make_repo "$H/repo" .agentcontext
+write_list $'.agentcontext\n'
+OUT=$(printf '%s' "$(wi_input "$H/repo")" | env -i HOME="$H" PATH="$NOGIT_BIN" "$WORKFLOW_IGNORE" 2>"$TMP_ROOT/stderr"); STATUS=$?
+expect_status0 "no git exits 0"
+expect_empty "no git prints nothing"
+expect_no_stderr "no git writes nothing to stderr"
+expect_no_file "no git writes nothing" "$H/.config"
+
+echo "== workflow-ignore: through session-start"
+new_home wstart
+make_repo "$H/repo" .agentcontext
+write_list $'.agentcontext\n'
+run_hook "$SESSION_START" "$(wi_input "$H/repo")"
+expect_status0 "session-start with an ignore list exits 0"
+expect_has "session-start keeps its own lines" "Session id: s-w"
+expect_has "session-start adds the global file line" "$(added_line "1 pattern" "~/.config/git/ignore")"
+expect_has "session-start adds the tracked line" "$TRACKED_LINE .agentcontext."
+for src in clear compact resume fork; do
+  run_hook "$SESSION_START" "$(wi_input "$H/repo" "$src")"
+  expect_has "session-start ($src) runs the check" "$TRACKED_LINE .agentcontext."
+done
+rm -f "$(ignore_list)"
+run_hook "$SESSION_START" "$(wi_input "$H/repo")"
+expect_lacks "session-start without an ignore list adds nothing" "Workflow files"
 
 echo
 printf '%d passed, %d failed\n' "$passed" "$failed"
