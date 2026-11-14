@@ -100,8 +100,8 @@ export interface SessionEntry {
   inbox: InboxEvent[];
   /** The open question, if any. */
   question: Record<string, unknown> | null;
-  /** When the channel was last renamed, for the 5-minute rename spacing. */
-  renamedAt: number | null;
+  /** When the channel was last renamed, oldest first: the last two times, for Discord's rename limit. */
+  renames: number[];
   /** The channel should be made as soon as Discord is reachable (the chat started while offline). */
   wantsChannel: boolean;
   /** When the session's run was marked finished (`send --done`), which stops check-ins. */
@@ -144,7 +144,7 @@ export function newSession(o: {
     closedAt: null,
     inbox: [],
     question: null,
-    renamedAt: null,
+    renames: [],
     wantsChannel: false,
     doneAt: null,
     lastSendAt: null,
@@ -162,10 +162,17 @@ function num(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+/** The stored rename times, or the single `renamedAt` an older file kept instead. */
+function readRenames(renames: unknown, renamedAt: unknown): number[] {
+  if (Array.isArray(renames)) return renames.map(num).filter((at): at is number => at !== null);
+  const at = num(renamedAt);
+  return at === null ? [] : [at];
+}
+
 /** Read one stored entry, filling in fields an older file lacks. Null when it is not an entry at all. */
 function readEntry(sessionId: string, raw: unknown): SessionEntry | null {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
-  const r = raw as Record<string, unknown>;
+  const { renamedAt, ...r } = raw as Record<string, unknown>;
   const surface = r.surface;
   if (surface !== "desktop" && surface !== "vs" && surface !== "cli") return null;
   const createdAt = num(r.createdAt) ?? 0;
@@ -184,7 +191,7 @@ function readEntry(sessionId: string, raw: unknown): SessionEntry | null {
     closedAt: num(r.closedAt),
     inbox: Array.isArray(r.inbox) ? (r.inbox.filter((e) => e && typeof e === "object") as InboxEvent[]) : [],
     question: r.question && typeof r.question === "object" ? (r.question as Record<string, unknown>) : null,
-    renamedAt: num(r.renamedAt),
+    renames: readRenames(r.renames, renamedAt),
     wantsChannel: r.wantsChannel === true,
     doneAt: num(r.doneAt),
     lastSendAt: num(r.lastSendAt),
@@ -256,7 +263,7 @@ export class SessionStore {
       e.channelId = null;
       e.channelName = null;
       e.archived = false;
-      e.renamedAt = null;
+      e.renames = [];
     });
   }
 

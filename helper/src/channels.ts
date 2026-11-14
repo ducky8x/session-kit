@@ -16,8 +16,9 @@ export const NAME_MAX = 80;
 export const CATEGORY_LIMIT = 50;
 /** Discord allows 500 channels in a server; past this many, the oldest archived channel makes room. */
 export const SERVER_SOFT_LIMIT = 490;
-/** Discord allows two renames per channel per 10 minutes; the helper renames at most once per 5. */
-export const RENAME_SPACING_MS = 5 * MINUTE_MS;
+/** Discord allows two renames per channel in any 10 minutes. */
+export const RENAME_WINDOW_MS = 10 * MINUTE_MS;
+export const RENAMES_PER_WINDOW = 2;
 /**
  * A session that ended more than this long before another one started can't be the chat that one continues.
  * (`/clear` ends the old session id just before the new one starts.)
@@ -80,7 +81,8 @@ export interface Timing {
   archiveMs: number;
   /** No messages for this long: the channel is deleted and the session forgotten. */
   deleteMs: number;
-  renameSpacingMs: number;
+  /** A channel is renamed at most `RENAMES_PER_WINDOW` times in this long. */
+  renameWindowMs: number;
   /** How long `register` waits for its work before answering. The session-start hook gives the call 2 seconds. */
   registerWaitMs: number;
 }
@@ -88,7 +90,7 @@ export interface Timing {
 export const DEFAULT_TIMING: Timing = {
   archiveMs: 7 * DAY_MS,
   deleteMs: 30 * DAY_MS,
-  renameSpacingMs: RENAME_SPACING_MS,
+  renameWindowMs: RENAME_WINDOW_MS,
   registerWaitMs: 1200,
 };
 
@@ -189,7 +191,7 @@ function asChannel(raw: unknown): GuildChannel | null {
  * overflow categories past 50), moved to Archive after a quiet week and deleted after a quiet month.
  *
  * Changes to the server's layout (create, move, delete) run one at a time, so two sessions starting together
- * cannot both make "Desktop 2". Renames run on their own, at most one per channel every five minutes.
+ * cannot both make "Desktop 2". Renames run on their own, at most two per channel in any 10 minutes.
  */
 export class ChannelManager {
   readonly timing: Timing;
@@ -517,7 +519,7 @@ export class ChannelManager {
       e.channelId = channelId;
       e.channelName = from.channelName;
       e.archived = from.archived;
-      e.renamedAt = from.renamedAt;
+      e.renames = [...from.renames];
       e.wantsChannel = false;
       e.lastMessageAt = this.d.clock.now();
       e.ownerMessageAt = Math.max(from.ownerMessageAt ?? 0, e.ownerMessageAt ?? 0) || null;
@@ -527,7 +529,7 @@ export class ChannelManager {
       e.channelId = null;
       e.channelName = null;
       e.archived = false;
-      e.renamedAt = null;
+      e.renames = [];
       e.wantsChannel = false;
       e.inbox = [];
       e.movedTo = to.sessionId;
@@ -671,7 +673,7 @@ export class ChannelManager {
       e.channelName = made.name || name;
       e.archived = false;
       e.wantsChannel = false;
-      e.renamedAt = null;
+      e.renames = [];
       // A new channel starts its quiet-time count now.
       e.lastMessageAt = this.d.clock.now();
     });
@@ -796,16 +798,29 @@ export class ChannelManager {
     );
   }
 
-  /** Rename when the wanted name differs: now, or once five minutes have passed since the last rename. */
+  /** Rename when the wanted name differs: now, or once the channel's last renames allow another. */
   private requestRename(sessionId: string): void {
     if (this.stopped || !this.d.isOnline() || this.renameTimers.has(sessionId) || this.renaming.has(sessionId)) return;
     const entry = this.d.sessions.get(sessionId);
     // Without a name of its own, a session keeps the name its channel has.
     if (!entry || entry.channelId === null || isUnnamed(entry.name)) return;
     if (this.wantedName(entry) === entry.channelName) return;
-    const wait = (entry.renamedAt ?? Number.NEGATIVE_INFINITY) + this.timing.renameSpacingMs - this.d.clock.now();
+    const wait = this.renameWait(entry);
     if (wait > 0) this.scheduleRename(sessionId, wait);
     else void this.track(this.renameNow(sessionId));
+  }
+
+  /** How long until the channel can be renamed again without going over Discord's limit. */
+  private renameWait(entry: SessionEntry): number {
+    const windowMs = this.timing.renameWindowMs;
+    const counted = entry.renames.at(-RENAMES_PER_WINDOW);
+    // Never more than one window, even after the system clock was set back.
+    return counted === undefined ? 0 : Math.min(counted + windowMs - this.d.clock.now(), windowMs);
+  }
+
+  /** A rename was sent (whatever Discord answered): it counts toward the limit. */
+  private countRename(e: SessionEntry): void {
+    e.renames = [...e.renames, this.d.clock.now()].slice(-RENAMES_PER_WINDOW);
   }
 
   /** Send the rename, with the name wanted at this moment (so a wait never sends a stale one). */
@@ -830,10 +845,11 @@ export class ChannelManager {
         if (cached) cached.name = name;
         this.d.sessions.update(sessionId, (e) => {
           e.channelName = name;
-          e.renamedAt = this.d.clock.now();
+          this.countRename(e);
         });
       } catch (error) {
         if (error instanceof RestError && error.kind === "rate-limited") {
+          this.d.sessions.update(sessionId, (e) => this.countRename(e));
           this.renaming.delete(sessionId);
           this.scheduleRename(sessionId, error.retryAfterMs);
           return;
@@ -845,9 +861,7 @@ export class ChannelManager {
           return;
         }
         this.d.log.warn(`renaming channel ${channelId} failed: ${(error as Error).message}`);
-        this.d.sessions.update(sessionId, (e) => {
-          e.renamedAt = this.d.clock.now();
-        });
+        this.d.sessions.update(sessionId, (e) => this.countRename(e));
       }
     } finally {
       this.renaming.delete(sessionId);
