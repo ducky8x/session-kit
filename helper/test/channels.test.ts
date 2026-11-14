@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { RENAME_SPACING_MS, SERVER_SOFT_LIMIT } from "../src/channels.ts";
+import { RENAMES_PER_WINDOW, RENAME_WINDOW_MS, SERVER_SOFT_LIMIT } from "../src/channels.ts";
 import { BOT_ID, GUILD_ID, OWNER_ID } from "./fakes/fake-rest.ts";
 import { type ChannelKit, SID, channelKit } from "./helpers/channel-kit.ts";
 import { transcripts } from "./helpers/transcripts.ts";
@@ -213,31 +213,70 @@ describe("registering sessions", () => {
 });
 
 describe("renames", () => {
-  test("a name change at minute 1 renames at once; one at minute 3 waits until minute 6, with the latest name", async () => {
+  test("two renames go out at once; a third waits until 10 minutes after the first, with the latest name", async () => {
     const k = await channelKit();
     await k.channels.reconcile();
     await open(k, startup());
     const channelId = k.sessions.get(SID)!.channelId!;
     const renames = () => k.fake.requestsMatching("PATCH", `/channels/${channelId}`).map((r) => r.body.name);
-    expect(RENAME_SPACING_MS).toBe(5 * MINUTE);
+    const rename = async (name: string) => {
+      k.channels.applyNames(new Map([[SID, name]]));
+      await k.channels.settle();
+    };
+    expect(RENAME_WINDOW_MS).toBe(10 * MINUTE);
+    expect(RENAMES_PER_WINDOW).toBe(2);
 
+    // Making the channel isn't a rename.
     await k.clock.advance(MINUTE);
-    k.channels.applyNames(new Map([[SID, "First name"]]));
-    await k.channels.settle();
+    await rename("First name");
     expect(renames()).toEqual(["first-name-desktop"]);
-
     await k.clock.advance(2 * MINUTE); // minute 3
-    k.channels.applyNames(new Map([[SID, "Second name"]]));
-    await k.channels.settle();
+    await rename("Second name");
+    expect(renames()).toEqual(["first-name-desktop", "second-name-desktop"]);
+
     await k.clock.advance(MINUTE); // minute 4
-    k.channels.applyNames(new Map([[SID, "Third name"]]));
-    await k.channels.settle();
-    await k.clock.advance(2 * MINUTE - 1); // just before minute 6
-    expect(renames()).toEqual(["first-name-desktop"]);
+    await rename("Third name");
+    await k.clock.advance(MINUTE); // minute 5
+    await rename("Fourth name");
+    await k.clock.advance(6 * MINUTE - 1); // just before minute 11
+    expect(renames()).toHaveLength(2);
     await k.clock.advance(1);
     await k.channels.settle();
-    expect(renames()).toEqual(["first-name-desktop", "third-name-desktop"]);
-    expect(k.sessions.get(SID)!.channelName).toBe("third-name-desktop");
+    expect(renames()).toEqual(["first-name-desktop", "second-name-desktop", "fourth-name-desktop"]);
+    expect(k.sessions.get(SID)!.channelName).toBe("fourth-name-desktop");
+
+    // The last two renames were at minutes 3 and 11, so the next one waits until minute 13.
+    await k.clock.advance(MINUTE);
+    await rename("Fifth name");
+    await k.clock.advance(MINUTE - 1);
+    expect(renames()).toHaveLength(3);
+    await k.clock.advance(1);
+    await k.channels.settle();
+    expect(renames().at(-1)).toBe("fifth-name-desktop");
+    expect(k.sessions.get(SID)!.renames).toEqual([k.clock.now() - 2 * MINUTE, k.clock.now()]);
+  });
+
+  test("a rename that fails counts as one of the two", async () => {
+    const k = await channelKit();
+    await k.channels.reconcile();
+    await open(k, startup());
+    const channelId = k.sessions.get(SID)!.channelId!;
+    const renames = () => k.fake.requestsMatching("PATCH", `/channels/${channelId}`).map((r) => r.body.name);
+    k.fake.failNext({ method: "PATCH", path: `/channels/${channelId}`, status: 403, body: { code: 50013 } });
+    k.channels.applyNames(new Map([[SID, "First name"]]));
+    await k.channels.settle();
+    // The failed attempt and the retry right after it.
+    expect(renames()).toEqual(["first-name-desktop", "first-name-desktop"]);
+    expect(k.fake.channels.get(channelId)!.name).toBe("first-name-desktop");
+
+    await k.clock.advance(MINUTE);
+    k.channels.applyNames(new Map([[SID, "Second name"]]));
+    await k.channels.settle();
+    await k.clock.advance(9 * MINUTE - 1);
+    expect(renames()).toHaveLength(2);
+    await k.clock.advance(1);
+    await k.channels.settle();
+    expect(renames().at(-1)).toBe("second-name-desktop");
   });
 
   test('"New session" keeps the folder name; an unchanged name sends nothing', async () => {
@@ -263,9 +302,18 @@ describe("renames", () => {
     expect(k.fake.requestsMatching("PATCH", `/channels/${channelId}`)).toHaveLength(1);
     await k.clock.advance(1);
     await k.channels.settle();
-    const bodies = k.fake.requestsMatching("PATCH", `/channels/${channelId}`).map((r) => r.body.name);
-    expect(bodies).toEqual(["old-wish-desktop", "new-wish-desktop"]);
+    const bodies = () => k.fake.requestsMatching("PATCH", `/channels/${channelId}`).map((r) => r.body.name);
+    expect(bodies()).toEqual(["old-wish-desktop", "new-wish-desktop"]);
     expect(k.fake.channels.get(channelId)!.name).toBe("new-wish-desktop");
+
+    // The 429 counted as a rename: with the retry, the next one waits until 10 minutes after the 429.
+    k.channels.applyNames(new Map([[SID, "Third wish"]]));
+    await k.channels.settle();
+    await k.clock.advance(10 * MINUTE - 90_000 - 1);
+    expect(bodies()).toHaveLength(2);
+    await k.clock.advance(1);
+    await k.channels.settle();
+    expect(bodies().at(-1)).toBe("third-wish-desktop");
   });
 });
 
@@ -371,9 +419,8 @@ describe("continuations", () => {
     const renames = () => k.fake.requestsMatching("PATCH", `/channels/${channelId}`).map((r) => r.body);
     expect(renames()).toHaveLength(1);
 
+    // The channel was renamed once, so this one goes out at once.
     k.channels.applyNames(new Map([[B, "Pack the bags"]]));
-    await k.channels.settle();
-    await k.clock.advance(RENAME_SPACING_MS);
     await k.channels.settle();
     expect(renames()[1]).toEqual({ name: "pack-the-bags-cli", topic: `session ${B} · cli · home` });
     expect(k.sessions.get(B)!.channelName).toBe("pack-the-bags-cli");

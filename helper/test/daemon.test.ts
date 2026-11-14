@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { DAY_MS } from "../src/channels.ts";
 import { HelperError } from "../src/client.ts";
 import { Daemon, type DiscordMessage } from "../src/daemon.ts";
@@ -229,6 +229,22 @@ describe("daemon sessions", () => {
     await k.clock.advance(0); // the first poll
     await k.daemon.settle();
     await waitFor(() => k.rest.channelNamed("fix-login-bug-cli") !== undefined);
+    expect(k.daemon.sessions.get(SID)!.name).toBe("Fix login bug");
+  });
+
+  test("a desktop session renamed in the desktop app after it ended has its channel renamed", async () => {
+    const k = await daemonKit();
+    await k.connected();
+    await k.startChat(SID, "claude-desktop");
+    await k.call({ op: "ended", sessionId: SID, reason: "other" });
+    expect(k.rest.channelNamed("session-kit-caa2-desktop")).toBeDefined();
+
+    const dir = join(k.paths.desktopSessions, "acct-0001", "org-0001");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "local_0001.json"), JSON.stringify({ cliSessionId: SID, title: "Fix login bug", titleSource: "user" }));
+    await k.daemon.names.poll();
+    await k.daemon.settle();
+    await waitFor(() => k.rest.channelNamed("fix-login-bug-desktop") !== undefined);
     expect(k.daemon.sessions.get(SID)!.name).toBe("Fix login bug");
   });
 });

@@ -1,8 +1,16 @@
-import { describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { describe, expect, spyOn, test } from "bun:test";
+import { appendFileSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { channelNameFor, isUnnamed, slugify, surfaceFor } from "../src/channels.ts";
 import { memoryLogger } from "../src/log.ts";
-import { AGENTS_TIMEOUT_MS, NamePoller, POLL_INTERVAL_MS, parseAgentList, readCustomTitle } from "../src/names.ts";
+import {
+  AGENTS_TIMEOUT_MS,
+  DesktopRecords,
+  NamePoller,
+  POLL_INTERVAL_MS,
+  parseAgentList,
+  readCustomTitle,
+} from "../src/names.ts";
 import { pathsFor } from "../src/paths.ts";
 import { SessionStore, newSession } from "../src/state.ts";
 import { FakeClock } from "./fakes/fake-clock.ts";
@@ -160,22 +168,110 @@ describe("readCustomTitle", () => {
 
 describe("NamePoller", () => {
   function kit() {
-    const paths = pathsFor(tmpDir());
+    const home = tmpDir();
+    const paths = pathsFor(home);
     const sessions = new SessionStore(paths);
     const clock = new FakeClock();
     const runner = new FakeProcessRunner();
+    // What `claude agents --json` lists, once a test sets it with `list`.
+    let rows: unknown[] | null = null;
+    runner.on((cmd) => (rows !== null && cmd[1] === "agents" ? { code: 0, stdout: JSON.stringify(rows), stderr: "" } : undefined));
     const names: [string, string | null][] = [];
+    let latest = new Map<string, string>();
+    // Made by the first record a test writes, so a kit that writes none has no folder at all.
+    const desktopDir = join(home, "claude-code-sessions");
     const poller = new NamePoller({
       runner,
       clock,
       log: memoryLogger(),
       sessions,
       claudePath: () => "/opt/tools/claude",
+      desktopSessionsDir: desktopDir,
       onNames: (seen) => {
+        latest = new Map(seen);
         for (const [id, name] of seen) names.push([id, name]);
       },
     });
-    return { paths, sessions, clock, runner, names, poller };
+    // Every file write gets a later mtime than the one before, a second apart.
+    let stamp = Date.UTC(2026, 10, 4, 12) / 1000;
+    const touch = (file: string, at = ++stamp) => {
+      utimesSync(file, at, at);
+      return at;
+    };
+    return {
+      paths,
+      sessions,
+      clock,
+      runner,
+      names,
+      poller,
+      desktopDir,
+      touch,
+      /** The names the last poll found. */
+      latest: () => latest,
+      /** Set the rows `claude agents --json` lists. */
+      list: (next: unknown[]) => {
+        rows = next;
+      },
+      /** Poll (with nothing listed, unless a test said otherwise) and return the names found. */
+      poll: async () => {
+        rows ??= [];
+        await poller.poll();
+        return latest;
+      },
+      /** A transcript whose last custom-title line is `title`. */
+      transcript: (title: string) => {
+        const file = join(tmpDir(), "t.jsonl");
+        writeFileSync(file, `${JSON.stringify({ type: "user", message: "hi" })}\n${customTitle(title)}`);
+        touch(file);
+        return file;
+      },
+      /** `/rename`: one more custom-title line at the end of the transcript. */
+      rename: (file: string, title: string) => {
+        appendFileSync(file, customTitle(title));
+        touch(file);
+      },
+      /**
+       * The desktop app's record of one of its sessions, at <root>/<account>/<org>/local_<its own id>.json, with
+       * the fields the helper reads among others it ignores.
+       */
+      desktopRecord: (cliSessionId: string, title: string, o: { file?: string; titleSource?: string } = {}) => {
+        const dir = join(desktopDir, "acct-0001", "org-0001");
+        mkdirSync(dir, { recursive: true });
+        const file = join(dir, o.file ?? `local_${cliSessionId}-own.json`);
+        const record = {
+          sessionId: `local_${cliSessionId}-own`,
+          cliSessionId,
+          cwd: "/work/app",
+          title,
+          titleSource: o.titleSource ?? "user",
+          isArchived: false,
+          model: "some-model",
+          lastActivityAt: 1762300000000,
+        };
+        writeFileSync(file, JSON.stringify(record));
+        touch(file);
+        return file;
+      },
+    };
+  }
+
+  function customTitle(title: string) {
+    return `${JSON.stringify({ type: "custom-title", customTitle: title, sessionId: SID })}\n`;
+  }
+
+  /** A session that has ended, with its channel still there unless `channelId` is null. */
+  function ended(
+    sessionId: string,
+    surface: "desktop" | "vs" | "cli",
+    transcriptPath: string | null,
+    o: { channelId?: string | null; name?: string | null } = {},
+  ) {
+    return {
+      ...newSession({ sessionId, surface, cwd: "/work/app", transcriptPath, now: 0, name: o.name ?? null }),
+      channelId: o.channelId === undefined ? `chan-${sessionId.slice(0, 4)}` : o.channelId,
+      closedAt: 5,
+    };
   }
 
   test("asks claude agents --json every 30 seconds with a 5-second limit", async () => {
@@ -227,5 +323,180 @@ describe("NamePoller", () => {
     await k.poller.poll();
     expect(k.names).toEqual([["s1", "Saved title"]]);
     expect(k.poller.alive("s1")).toBeNull();
+  });
+
+  test("a session that has ended keeps getting its name while it has a channel; one whose channel was deleted is left alone", async () => {
+    const k = kit();
+    const transcript = k.transcript("Renamed after it ended");
+    k.sessions.put(ended("aaaa0001", "cli", transcript));
+    k.sessions.put(ended("bbbb0002", "vs", transcript, { channelId: null }));
+    expect(await k.poll()).toEqual(new Map([["aaaa0001", "Renamed after it ended"]]));
+  });
+
+  test("an ended desktop session renamed in the desktop app's sidebar takes the new title", async () => {
+    const k = kit();
+    const transcript = k.transcript("Fix login bug");
+    k.desktopRecord(SID, "Fix login bug");
+    k.sessions.put(ended(SID, "desktop", transcript, { name: "Fix login bug" }));
+    expect((await k.poll()).get(SID)).toBe("Fix login bug");
+
+    k.desktopRecord(SID, "Fix the login page");
+    expect((await k.poll()).get(SID)).toBe("Fix the login page");
+    // The transcript's older title doesn't take it back.
+    expect((await k.poll()).get(SID)).toBe("Fix the login page");
+  });
+
+  test("an ended desktop session renamed with /rename somewhere else takes that name, and keeps it", async () => {
+    const k = kit();
+    const transcript = k.transcript("Fix login bug");
+    k.desktopRecord(SID, "Fix login bug");
+    k.sessions.put(ended(SID, "desktop", transcript, { name: "Fix login bug" }));
+    expect((await k.poll()).get(SID)).toBe("Fix login bug");
+
+    // Resumed in a terminal, renamed and closed again between two polls: only the transcript knows.
+    k.rename(transcript, "Login page");
+    expect((await k.poll()).get(SID)).toBe("Login page");
+    // The desktop app's record still has the old title, and is touched for something else.
+    k.touch(k.desktopRecord(SID, "Fix login bug"));
+    expect((await k.poll()).get(SID)).toBe("Login page");
+
+    // A rename in the sidebar after that wins again.
+    k.desktopRecord(SID, "Login page, take two");
+    expect((await k.poll()).get(SID)).toBe("Login page, take two");
+  });
+
+  test("with nothing to compare against yet, the desktop record and the transcript go by which changed last", async () => {
+    const sidebarLater = kit();
+    const t1 = sidebarLater.transcript("Old title");
+    sidebarLater.desktopRecord(SID, "Sidebar title");
+    sidebarLater.sessions.put(ended(SID, "desktop", t1, { name: "Old title" }));
+    expect((await sidebarLater.poll()).get(SID)).toBe("Sidebar title");
+
+    const renameLater = kit();
+    renameLater.desktopRecord(SID, "Old title");
+    const t2 = renameLater.transcript("Renamed in a terminal");
+    renameLater.sessions.put(ended(SID, "desktop", t2, { name: "Old title" }));
+    expect((await renameLater.poll()).get(SID)).toBe("Renamed in a terminal");
+  });
+
+  test("while claude agents lists a desktop session, its row wins over the desktop record and the transcript", async () => {
+    const k = kit();
+    const transcript = k.transcript("Transcript title");
+    k.desktopRecord(SID, "Sidebar title");
+    k.sessions.put(newSession({ sessionId: SID, surface: "desktop", cwd: "/w", transcriptPath: transcript, now: 0 }));
+    k.list([{ sessionId: SID, kind: "interactive", name: "Row name", status: "idle", pid: 1 }]);
+    expect((await k.poll()).get(SID)).toBe("Row name");
+    // Once it's no longer listed, the desktop record counts (it changed after the transcript).
+    k.list([]);
+    expect((await k.poll()).get(SID)).toBe("Sidebar title");
+  });
+
+  test("the desktop record is read only for desktop sessions, and an unnamed title doesn't count", async () => {
+    const k = kit();
+    const transcript = k.transcript("From the transcript");
+    k.desktopRecord("aaaa0001", "Sidebar title");
+    k.desktopRecord(SID, "New session");
+    k.sessions.put(ended("aaaa0001", "cli", transcript));
+    k.sessions.put(ended(SID, "desktop", transcript));
+    expect(await k.poll()).toEqual(
+      new Map([
+        ["aaaa0001", "From the transcript"],
+        [SID, "From the transcript"],
+      ]),
+    );
+  });
+
+  test("desktop records it can't read are skipped, as is a missing folder", async () => {
+    const k = kit();
+    const transcript = k.transcript("From the transcript");
+    const ids = ["aaaa0001", "bbbb0002", "cccc0003", "dddd0004", "eeee0005", "ffff0006"];
+    for (const id of ids) k.sessions.put(ended(id, "desktop", transcript));
+    // No folder yet.
+    expect([...(await k.poll()).values()]).toEqual(ids.map(() => "From the transcript"));
+
+    const dir = join(k.desktopDir, "acct-0001", "org-0001");
+    k.desktopRecord("ffff0006", "Sidebar title");
+    writeFileSync(join(dir, "local_torn.json"), '{ "cliSessionId": "aaaa0001", "title": "Torn');
+    writeFileSync(join(dir, "local_no-title.json"), JSON.stringify({ cliSessionId: "bbbb0002", titleSource: "user" }));
+    writeFileSync(join(dir, "local_number.json"), JSON.stringify({ cliSessionId: "cccc0003", title: 42 }));
+    writeFileSync(join(dir, "local_list.json"), JSON.stringify([{ cliSessionId: "dddd0004", title: "In a list" }]));
+    mkdirSync(join(dir, "local_folder.json"));
+    writeFileSync(join(dir, "deleted_eeee0005"), JSON.stringify({ cliSessionId: "eeee0005", title: "Deleted" }));
+    writeFileSync(join(dir, "scheduled-tasks.json"), JSON.stringify({ cliSessionId: "eeee0005", title: "Other file" }));
+    writeFileSync(join(k.desktopDir, "acct-0001", "local_shallow.json"), JSON.stringify({ cliSessionId: "eeee0005", title: "Too shallow" }));
+    writeFileSync(join(k.desktopDir, "stray-file"), "not a folder");
+    const names = await k.poll();
+    expect(names.get("ffff0006")).toBe("Sidebar title");
+    for (const id of ids.slice(0, 5)) expect(names.get(id)).toBe("From the transcript");
+  });
+
+  test("a transcript or desktop record whose mtime and size haven't changed isn't read again", async () => {
+    const k = kit();
+    const transcript = k.transcript("Title AAAA");
+    const record = k.desktopRecord(SID, "Title CCCC");
+    k.sessions.put(ended("aaaa0001", "cli", transcript));
+    k.sessions.put(ended(SID, "desktop", null));
+    expect(await k.poll()).toEqual(
+      new Map([
+        ["aaaa0001", "Title AAAA"],
+        [SID, "Title CCCC"],
+      ]),
+    );
+
+    // Same size, mtime put back: still the old titles.
+    const transcriptAt = k.touch(transcript);
+    const recordAt = k.touch(record);
+    await k.poll();
+    writeFileSync(transcript, `${JSON.stringify({ type: "user", message: "hi" })}\n${customTitle("Title BBBB")}`);
+    k.touch(transcript, transcriptAt);
+    writeFileSync(record, readFileSync(record, "utf8").replace("Title CCCC", "Title DDDD"));
+    k.touch(record, recordAt);
+    expect(await k.poll()).toEqual(
+      new Map([
+        ["aaaa0001", "Title AAAA"],
+        [SID, "Title CCCC"],
+      ]),
+    );
+
+    // A new mtime: read again.
+    k.touch(transcript);
+    k.touch(record);
+    expect(await k.poll()).toEqual(
+      new Map([
+        ["aaaa0001", "Title BBBB"],
+        [SID, "Title DDDD"],
+      ]),
+    );
+  });
+
+  test("the desktop records are scanned once per poll, and only when a desktop session needs a name", async () => {
+    const scans = spyOn(DesktopRecords.prototype, "titles");
+    try {
+      const k = kit();
+      const transcript = k.transcript("From the transcript");
+      k.desktopRecord("aaaa0001", "First");
+      k.desktopRecord("bbbb0002", "Second");
+      k.sessions.put(ended("aaaa0001", "desktop", transcript));
+      k.sessions.put(ended("bbbb0002", "desktop", transcript));
+      k.sessions.put(ended("cccc0003", "cli", transcript));
+      expect(await k.poll()).toEqual(
+        new Map([
+          ["aaaa0001", "First"],
+          ["bbbb0002", "Second"],
+          ["cccc0003", "From the transcript"],
+        ]),
+      );
+      expect(scans).toHaveBeenCalledTimes(1);
+
+      // Both desktop sessions listed by claude agents: their rows are enough.
+      k.list([
+        { sessionId: "aaaa0001", kind: "interactive", name: "First", status: "idle", pid: 1 },
+        { sessionId: "bbbb0002", kind: "interactive", name: "Second", status: "idle", pid: 2 },
+      ]);
+      await k.poll();
+      expect(scans).toHaveBeenCalledTimes(1);
+    } finally {
+      scans.mockRestore();
+    }
   });
 });

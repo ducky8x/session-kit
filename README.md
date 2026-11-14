@@ -110,6 +110,7 @@ To switch mid-session, say "turn cloud agents on" or "turn cloud agents off", or
 session-kit can give every interactive session its own channel in a private Discord server of yours. A small helper, `sk-discord`, runs in the background and keeps one bot in that server.
 
 - Each channel is named after its session, with a suffix for where the session runs: `-desktop` (the Claude desktop app), `-vs` (VS Code) or `-cli` (the terminal).
+- Renaming a session renames its channel within a minute, even after the session has ended. Discord allows two renames per channel in any 10 minutes, so a third one waits.
 - A session's channel appears with its first prompt or post, so a session you never use gets none. One chat keeps one channel: after `/clear`, or when you move a chat to the background, the channel goes with it.
 - A session posts in its channel when work finishes, fails or needs you. What you type in the channel reaches that session; `stop`, `pause`, `resume` and `status` work as commands.
 - A channel with no messages for 7 days moves to an Archive category. After 30 days without messages it's deleted.

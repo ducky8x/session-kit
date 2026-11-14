@@ -21,6 +21,8 @@ export interface Paths {
   updateState: string;
   /** The LaunchAgent that starts the helper at login. */
   launchAgent: string;
+  /** Where the Claude desktop app keeps its own records of its sessions, with the titles its sidebar shows. */
+  desktopSessions: string;
 }
 
 export function pathsFor(home: string): Paths {
@@ -39,5 +41,6 @@ export function pathsFor(home: string): Paths {
     updateLock: join(kit, "bin", ".sk-discord-update.lock"),
     updateState: join(dir, "update.json"),
     launchAgent: join(home, "Library", "LaunchAgents", "io.github.ducky8x.session-kit.discord.plist"),
+    desktopSessions: join(home, "Library", "Application Support", "Claude", "claude-code-sessions"),
   };
 }

@@ -266,6 +266,7 @@ export class Daemon {
       log,
       sessions: this.sessions,
       claudePath: () => this.config.claudePath ?? "claude",
+      desktopSessionsDir: paths.desktopSessions,
       onNames: (names) => this.channels.applyNames(names),
     });
     this.poller = new MessagePoller({

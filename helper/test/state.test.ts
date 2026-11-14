@@ -140,6 +140,40 @@ describe("SessionStore", () => {
     expect(store.get("aaaa1111")).toMatchObject({ sessionId: "aaaa1111", inbox: [], question: null, archived: false });
   });
 
+  test("an entry saved with one rename time (renamedAt) reads as that one rename, and is saved without it", () => {
+    const paths = pathsFor(tmpDir());
+    mkdirSync(paths.dir, { recursive: true });
+    const base = { channelId: "c1", surface: "vs", cwd: "/w", createdAt: 1, lastMessageAt: 2 };
+    writeFileSync(
+      paths.sessions,
+      JSON.stringify({
+        aaaa1111: { ...base, renamedAt: 1500 },
+        bbbb2222: { ...base, renamedAt: null },
+        cccc3333: { ...base, renames: [100, "x", 300, 400] },
+        dddd4444: { ...base, renames: "no" },
+      }),
+    );
+    const store = new SessionStore(paths);
+    expect(store.get("aaaa1111")!.renames).toEqual([1500]);
+    expect(store.get("bbbb2222")!.renames).toEqual([]);
+    expect(store.get("cccc3333")!.renames).toEqual([100, 300, 400]);
+    expect(store.get("dddd4444")!.renames).toEqual([]);
+    expect(newSession({ sessionId: "e", surface: "cli", cwd: "/w", transcriptPath: null, now: 0 }).renames).toEqual([]);
+
+    store.update("aaaa1111", () => {});
+    const raw = JSON.parse(readFileSync(paths.sessions, "utf8"));
+    expect(raw.aaaa1111.renames).toEqual([1500]);
+    expect("renamedAt" in raw.aaaa1111).toBe(false);
+  });
+
+  test("unlinking a session forgets its channel's renames", () => {
+    const paths = pathsFor(tmpDir());
+    const store = new SessionStore(paths);
+    store.put(entry("aaaa1111", "c1", { renames: [1000, 2000] }));
+    store.unlink("aaaa1111");
+    expect(store.get("aaaa1111")!.renames).toEqual([]);
+  });
+
   test("the inbox keeps the newest 50 events and says how many it dropped", () => {
     const store = new SessionStore(pathsFor(tmpDir()));
     store.put(entry("aaaa1111", "c1"));
