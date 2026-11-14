@@ -9,6 +9,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SESSION_START="$ROOT/hooks/session-start.sh"
 SUBAGENT_START="$ROOT/hooks/subagent-start.sh"
 DISCORD="$ROOT/hooks/discord.sh"
+GUARD="$ROOT/hooks/autonomous-guard.sh"
 HOOKS_JSON="$ROOT/hooks/hooks.json"
 
 TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/session-kit-test.XXXXXX") || exit 1
@@ -83,7 +84,7 @@ SETUP_LINE="Discord: turned on, but the helper isn't installed."
 UPDATE_LINE="Updating the Discord helper to"
 
 echo "== files"
-for f in "$SESSION_START" "$SUBAGENT_START" "$DISCORD"; do
+for f in "$SESSION_START" "$SUBAGENT_START" "$DISCORD" "$GUARD"; do
   if [ -x "$f" ]; then pass "$(basename "$f") is executable"; else fail "$(basename "$f") is executable"; fi
 done
 if python3 - "$HOOKS_JSON" <<'PY' 2>/dev/null
@@ -107,7 +108,7 @@ want = {
     "Stop": (None, "stop"),
 }
 for event, (matcher, arg) in want.items():
-    groups = hooks[event]
+    groups = [g for g in hooks[event] if any("/hooks/discord.sh" in h["command"] for h in g["hooks"])]
     assert len(groups) == 1, event
     assert groups[0].get("matcher") == matcher, event
     handler = groups[0]["hooks"][0]
@@ -125,6 +126,25 @@ wired = [m.group(1) for groups in hooks.values() for g in groups for h in g["hoo
 assert wired and all(arg in accepted for arg in wired), (wired, accepted)
 PY
 then pass "every event hooks.json sends to discord.sh is one it runs"; else fail "every event hooks.json sends to discord.sh is one it runs"; fi
+if python3 - "$HOOKS_JSON" <<'PY' 2>/dev/null
+import json, re, sys
+hooks = json.load(open(sys.argv[1]))["hooks"]
+pre = hooks["PreToolUse"]
+assert [g.get("matcher") for g in pre].count("AskUserQuestion") == 1
+groups = [g for g in pre if any("/hooks/autonomous-guard.sh" in h["command"] for h in g["hooks"])]
+assert len(groups) == 1, groups
+matcher = groups[0]["matcher"]
+assert set(matcher.split("|")) == {"mcp__ccd_turn__wrap_up", "mcp__ccd_session__start_session"}, matcher
+for name in ("mcp__ccd_turn__wrap_up", "mcp__ccd_session__start_session"):
+    assert re.fullmatch(matcher, name), name
+for name in ("AskUserQuestion", "mcp__ccd_turn__update_plan", "Bash"):
+    assert not re.fullmatch(matcher, name), name
+handler = groups[0]["hooks"][0]
+assert handler["type"] == "command"
+assert handler["command"] == '"${CLAUDE_PLUGIN_ROOT}/hooks/autonomous-guard.sh"'
+assert handler["timeout"] == 10
+PY
+then pass "hooks.json runs autonomous-guard.sh before wrap_up and start_session"; else fail "hooks.json runs autonomous-guard.sh before wrap_up and start_session"; fi
 
 echo "== session-start: startup and clear"
 new_home startup
@@ -689,6 +709,158 @@ run_hook "$SESSION_START" "$(start_input s-d startup)"
 expect_has "session-start passes on the update line" "$UPDATE_LINE 0.2.0."
 TEST_PLUGIN_ROOT=""
 TEST_UNAME=Linux
+
+echo "== autonomous guard"
+WRAP=mcp__ccd_turn__wrap_up
+START_SESSION=mcp__ccd_session__start_session
+# guard_input <session id> <tool name> <tool_input JSON>
+guard_input() { printf '{"session_id":"%s","transcript_path":"/tmp/t.jsonl","cwd":"/tmp","permission_mode":"default","hook_event_name":"PreToolUse","tool_name":"%s","tool_input":%s,"tool_use_id":"toolu_01"}' "$1" "$2" "$3"; }
+# write_state <session id> <JSON>
+write_state() { mkdir -p "$(state_dir)"; printf '%s\n' "$2" > "$(state_dir)/$1.json"; }
+# expect_deny <name> [text...]: the output is one valid PreToolUse deny, and
+# its reason holds each <text>.
+expect_deny() {
+  local name=$1
+  shift
+  if printf '%s' "$OUT" | python3 -c '
+import json, sys
+out = json.load(sys.stdin)
+assert list(out) == ["hookSpecificOutput"], out
+hso = out["hookSpecificOutput"]
+assert hso["hookEventName"] == "PreToolUse"
+assert hso["permissionDecision"] == "deny"
+reason = hso["permissionDecisionReason"]
+assert reason.strip()
+for text in sys.argv[1:]:
+    assert text in reason, text
+' "$@" 2>/dev/null
+  then pass "$name"; else fail "$name" "$OUT"; fi
+}
+
+new_home guard
+write_state g-on '{"workflow":"multi","autonomous":{"on":true,"scope":"session","keepAwakeTaskId":"x"},"cloud":{"on":false},"updatedAt":"2026-11-13T10:00:00Z"}'
+ASK_INPUT='{"recap":"Found why the button overlaps.","ask":"Fix the Describe button touching the last bar in small Mac windows?","actions":[{"label":"Yes, fix it"}]}'
+
+run_hook "$GUARD" "$(guard_input g-on "$WRAP" "$ASK_INPUT")"
+expect_status0 "wrap_up with an ask exits 0"
+expect_deny "autonomous on: wrap_up with an ask and a button is denied" "autonomous mode" "recap"
+run_hook "$GUARD" "$(guard_input g-on "$WRAP" '{"recap":"Done.","ask":"Ship it?"}')"
+expect_deny "autonomous on: wrap_up with an ask alone is denied"
+run_hook "$GUARD" "$(guard_input g-on "$WRAP" '{"recap":"Done.","actions":[{"action":"commit"}]}')"
+expect_deny "autonomous on: wrap_up with buttons alone is denied"
+run_hook "$GUARD" "$(guard_input g-on "$WRAP" '{"recap":"Done.","blocked":true}')"
+expect_deny "autonomous on: wrap_up with blocked true alone is denied"
+run_hook "$GUARD" "$(guard_input g-on "$WRAP" '{"recap":"Fixed the overlap and committed it."}')"
+expect_status0 "a recap-only wrap_up exits 0"
+expect_empty "autonomous on: a recap-only wrap_up passes"
+run_hook "$GUARD" "$(guard_input g-on "$WRAP" '{"recap":"Logged \"ask\":\"Ship it?\", \"actions\":[{\"label\":\"Yes\"}] and \"blocked\":true from the old run."}')"
+expect_empty "a recap that quotes ask, actions and blocked as text passes"
+run_hook "$GUARD" "$(guard_input g-on "$WRAP" '{"recap":"Done.","ask":"","actions":[],"blocked":false}')"
+expect_empty "an empty ask, an empty actions list and blocked false pass"
+run_hook "$GUARD" "$(guard_input g-on "$WRAP" '{"recap":"Done.","ask":null,"actions":null}')"
+expect_empty "a null ask and null actions pass"
+run_hook "$GUARD" "$(guard_input g-on "$WRAP" '{"recap":"Done.","notes":{"ask":"Ship it?","blocked":true},"links":[{"actions":["a"]}]}')"
+expect_empty "ask, actions and blocked nested deeper than wrap_up's own fields pass"
+run_hook "$GUARD" "$(printf '{\n  "session_id": "g-on",\n\t"tool_name": "%s",\n  "tool_input": {\n    "recap": "Caf\xc3\xa9 \xe2\x9c\x93 done.",\n    "ask": "Merge it?"\n  }\n}' "$WRAP")"
+expect_deny "a pretty-printed input with non-ASCII text is read"
+if [ -n "$UTF8_LOCALE" ]; then
+  TEST_LOCALE=$UTF8_LOCALE
+  run_hook "$GUARD" "$(guard_input g-on "$WRAP" '{"recap":"Café café ✓ done — caf'"$(printf '\xc3\xa9')"'","ask":"Merge it?"}')"
+  TEST_LOCALE=C
+  expect_deny "an ask is denied under $UTF8_LOCALE"
+else
+  pass "no UTF-8 locale installed; skipped the UTF-8 locale check"
+fi
+long=$(awk 'BEGIN { for (i = 0; i < 20000; i++) printf "word \\\" " }')
+SECONDS=0
+run_hook "$GUARD" "$(guard_input g-on "$WRAP" '{"recap":"'"$long"'","ask":"Ship it?"}')"
+elapsed=$SECONDS
+expect_deny "a wrap_up with a 160 KB recap is still read"
+if [ "$elapsed" -le 3 ]; then pass "a 160 KB input is read within 3 seconds (${elapsed}s)"; else fail "a 160 KB input is read within 3 seconds" "${elapsed}s"; fi
+
+write_state g-task '{"workflow":"single","autonomous":{"on":true,"scope":"task","task":"fix the \"build\" {fast}"},"updatedAt":"x"}'
+run_hook "$GUARD" "$(guard_input g-task "$WRAP" "$ASK_INPUT")"
+expect_deny "task-scoped autonomous mode denies an ask"
+write_state g-multiline '{
+  "workflow": "multi",
+  "autonomous": {
+    "on": true,
+    "scope": "session"
+  },
+  "updatedAt": "x"
+}'
+run_hook "$GUARD" "$(guard_input g-multiline "$WRAP" "$ASK_INPUT")"
+expect_deny "a pretty-printed state file with autonomous on denies an ask"
+write_state g-auto-first '{"workflow":"single","autonomous":{"on":true,"scope":"session"},"cloud":{"on":false},"updatedAt":"x"}'
+run_hook "$GUARD" "$(guard_input g-auto-first "$WRAP" "$ASK_INPUT")"
+expect_deny "autonomous on and cloud off denies an ask"
+write_state g-off '{"workflow":"multi","autonomous":{"on":false},"updatedAt":"x"}'
+run_hook "$GUARD" "$(guard_input g-off "$WRAP" "$ASK_INPUT")"
+expect_status0 "autonomous off exits 0"
+expect_empty "autonomous off: an ask passes"
+run_hook "$GUARD" "$(guard_input g-none "$WRAP" "$ASK_INPUT")"
+expect_status0 "no state file exits 0"
+expect_empty "no state file: an ask passes"
+write_state g-cloud '{"workflow":"multi","autonomous":{"on":false},"cloud":{"on":true,"remote":"unknown"},"updatedAt":"x"}'
+run_hook "$GUARD" "$(guard_input g-cloud "$WRAP" "$ASK_INPUT")"
+expect_empty "cloud on, autonomous off: an ask passes"
+write_state g-cloud-first '{"workflow":"multi","cloud":{"on":true},"autonomous":{"on":false},"updatedAt":"x"}'
+run_hook "$GUARD" "$(guard_input g-cloud-first "$WRAP" "$ASK_INPUT")"
+expect_empty "cloud on before autonomous off: an ask passes"
+write_state g-cloud-only '{"workflow":"multi","cloud":{"on":true},"updatedAt":"x"}'
+run_hook "$GUARD" "$(guard_input g-cloud-only "$WRAP" "$ASK_INPUT")"
+expect_empty "cloud on with no autonomous object: an ask passes"
+write_state g-junk 'not json {"autonomous":'
+run_hook "$GUARD" "$(guard_input g-junk "$WRAP" "$ASK_INPUT")"
+expect_status0 "a broken state file exits 0"
+expect_empty "a broken state file: an ask passes"
+
+run_hook "$GUARD" "$(guard_input g-on "$START_SESSION" '{"initiation":"offer","title":"Fix the Describe button"}')"
+expect_status0 "a start_session offer exits 0"
+expect_deny "autonomous on: a start_session offer is denied" "autonomous mode" "user_asked"
+for initiation in own_initiative user_asked; do
+  run_hook "$GUARD" "$(guard_input g-on "$START_SESSION" '{"initiation":"'"$initiation"'","title":"Fix it","prompt":"Fix the button.","background":"The button overlaps the last bar in small windows."}')"
+  expect_empty "autonomous on: start_session with $initiation passes"
+done
+run_hook "$GUARD" "$(guard_input g-on "$START_SESSION" '{"proposal_id":"task_ab12cd34"}')"
+expect_empty "autonomous on: start_session with a proposal id passes"
+run_hook "$GUARD" "$(guard_input g-on "$START_SESSION" '{"initiation":"user_asked","title":"Fix it","prompt":"Never send \"initiation\":\"offer\" here."}')"
+expect_empty "a prompt that quotes initiation offer as text passes"
+run_hook "$GUARD" "$(guard_input g-off "$START_SESSION" '{"initiation":"offer","title":"Fix it"}')"
+expect_empty "autonomous off: a start_session offer passes"
+
+run_hook "$GUARD" "$(guard_input g-on AskUserQuestion '{"questions":[{"question":"Ship it?"}],"ask":"Ship it?","blocked":true}')"
+expect_empty "other tools pass, even with ask and blocked fields"
+run_hook "$GUARD" "$(guard_input g-on mcp__ccd_turn__update_plan '{"ask":"Ship it?","initiation":"offer"}')"
+expect_empty "update_plan passes"
+
+run_hook "$GUARD" ""
+expect_status0 "empty stdin exits 0"
+expect_empty "empty stdin prints nothing"
+run_hook "$GUARD" "not json at all {"
+expect_status0 "garbage stdin exits 0"
+expect_empty "garbage stdin prints nothing"
+input=$(guard_input g-on "$WRAP" "$ASK_INPUT")
+run_hook "$GUARD" "${input%?}"
+expect_status0 "cut-off JSON exits 0"
+expect_empty "cut-off JSON prints nothing"
+run_hook "$GUARD" "$input garbage"
+expect_empty "JSON with trailing text prints nothing"
+run_hook "$GUARD" "$(guard_input g-on "$WRAP" '"Fix it?"')"
+expect_empty "a tool_input that isn't an object prints nothing"
+run_hook "$GUARD" '{"tool_name":"'"$WRAP"'","tool_input":'"$ASK_INPUT"'}'
+expect_empty "no session id prints nothing"
+mkdir -p "$H/.claude/session-kit"
+cp "$(state_dir)/g-on.json" "$H/.claude/session-kit/g-up.json"
+run_hook "$GUARD" "$(guard_input ../g-up "$WRAP" "$ASK_INPUT")"
+expect_status0 "a session id with path characters exits 0"
+expect_empty "a session id with path characters is not used in a path"
+OUT=$(env -i HOME="$H" PATH="$PATH" "$GUARD" </dev/null 2>/dev/null); STATUS=$?
+expect_status0 "no stdin at all exits 0"
+expect_empty "no stdin at all prints nothing"
+OUT=$(printf '%s' "$input" | env -i PATH="$PATH" "$GUARD" 2>/dev/null); STATUS=$?
+expect_status0 "unset HOME exits 0"
+expect_empty "unset HOME prints nothing"
 
 echo
 printf '%d passed, %d failed\n' "$passed" "$failed"

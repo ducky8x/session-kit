@@ -50,7 +50,7 @@ After a summary of the chat (compaction), a resume or a fork, the hook restates 
 | Command | What it does |
 | :- | :- |
 | `/session-kit:start` | Sets the session's workflow, autonomous mode and [cloud agents](#cloud-agents). Runs by itself at session start; run it again to change the setup. It also creates your rules file from the template when you ask. |
-| `/session-kit:autonomous-mode` | Turns autonomous mode on or off. Followed by a task, it turns it on for that task only. While it's on, Claude decides instead of asking, still stops for irreversible steps, lists the decisions it made, and keeps a Mac awake. |
+| `/session-kit:autonomous-mode` | Turns autonomous mode on or off. Followed by a task, it turns it on for that task only. While it's on, Claude decides instead of asking, still stops for irreversible steps, lists the decisions it made, and keeps a Mac awake. In the desktop app, Claude doesn't end a turn on a next-step question or a new-session offer (a hook enforces this). It takes the step itself, or names it in the recap when the step needs you. |
 | `/session-kit:load-context` | Reads every `.agentcontext` file in the current folder and its parents, plus the README each one points to. |
 | `/session-kit:create-context` | Writes a `.agentcontext` brief for the current project and keeps it out of git. |
 | `/session-kit:update-context` | Updates `.agentcontext` with what the session finished and what's left, and prunes stale lines. |
@@ -150,7 +150,7 @@ Each session's setup is saved in `~/.claude/session-kit/state/<session id>.json`
 
 ## Requirements
 
-- bash and standard tools (`sed`, `awk`, `find`, `tr`, `wc`). The hooks don't need python3 or jq. On Windows, the hooks need Git Bash.
+- bash and standard tools (`sed`, `awk`, `grep`, `find`, `tr`, `wc`). The hooks don't need python3 or jq. On Windows, the hooks need Git Bash.
 - Keep-awake in autonomous mode uses `caffeinate`, so it only works on macOS. On other systems autonomous mode runs without it and says so.
 
 ## Running the tests
@@ -159,7 +159,7 @@ Each session's setup is saved in `~/.claude/session-kit/state/<session id>.json`
 bash tests/test-hooks.sh
 ```
 
-The tests run each hook with a temporary `HOME`, so they never touch your real `~/.claude`. They use python3 to check the JSON the subagent hook prints.
+The tests run each hook with a temporary `HOME`, so they never touch your real `~/.claude`. They use python3 to check the JSON that the subagent hook and the autonomous-mode guard print.
 
 ## If you already have your own versions
 
