@@ -17,9 +17,17 @@ export function laterId(a: string, b: string): boolean {
   return BigInt(a) > BigInt(b);
 }
 
+/** Discord's epoch, 2015-01-01: an id holds the milliseconds since then above its low 22 bits. */
+const DISCORD_EPOCH_MS = 1_420_070_400_000;
+
+/** When the message (or channel) with this id was made, in milliseconds since 1970. */
+export function idTime(id: string): number {
+  return Number(BigInt(id) >> 22n) + DISCORD_EPOCH_MS;
+}
+
 /**
  * The newest message the helper has seen in each channel it reads, in `cursors.json`, so a check on battery
- * power starts where the last one (or the gateway) stopped, even after a restart.
+ * power, or the catch-up after a new gateway session, starts where the helper last stopped, even after a restart.
  */
 export class CursorStore {
   private readonly cursors = new Map<string, string>();
@@ -88,6 +96,8 @@ export interface PollerDeps {
   prepare(): Promise<string[]>;
   /** A message found in a channel, oldest first, to be handled like a gateway MESSAGE_CREATE. */
   deliver(message: DiscordMessage): void;
+  /** The message was handed on before, by the gateway or an earlier read. */
+  handled(messageId: string): boolean;
   /** Discord says the channel is gone. */
   onUnknownChannel(channelId: string): void;
   /** Discord refused the bot token. The checks have stopped. */
@@ -95,9 +105,31 @@ export interface PollerDeps {
 }
 
 /**
+ * How one pass over the channels reads them. `since` gives starting points that take the place of the cursors.
+ * With `maxAgeMs` it's a catch-up: only the channels in `since` are read, a message older than that is skipped,
+ * and a failure is only logged.
+ */
+interface Pass {
+  since?: ReadonlyMap<string, string>;
+  maxAgeMs?: number;
+}
+
+/** What a catch-up found: messages handed on, and messages skipped as too old. */
+interface Tally {
+  handedOn: number;
+  skipped: number;
+}
+
+/** "1 message", "2 messages". */
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+/**
  * Checks Discord for new messages on a timer, for when the helper keeps no gateway connection (on battery
  * power). Each check reads every channel the helper watches, after its cursor, one channel at a time; the REST
- * client waits out rate limits. Network trouble ends a check early, and the next one tries again.
+ * client waits out rate limits. Network trouble ends a check early, and the next one tries again. A catch-up
+ * (`catchUp`) reads the same way, once, after a new gateway session.
  */
 export class MessagePoller {
   private timer: TimerHandle | null = null;
@@ -144,12 +176,25 @@ export class MessagePoller {
 
   /**
    * Read every watched channel once, after any check still under way. `since` gives the starting point for
-   * some channels in place of their cursors (the catch-up after the gateway comes back).
+   * some channels in place of their cursors (after a switch to AC power).
    */
   check(since?: ReadonlyMap<string, string>): Promise<void> {
+    return this.enqueue(since === undefined ? {} : { since });
+  }
+
+  /**
+   * Read what came in while the helper had no gateway session: each channel in `from`, after the message id it
+   * gives, after any check still under way. A message older than `maxAgeMs` is skipped, though the cursor still
+   * moves past it. A failure is only logged.
+   */
+  catchUp(from: ReadonlyMap<string, string>, maxAgeMs: number): Promise<void> {
+    return this.enqueue({ since: from, maxAgeMs });
+  }
+
+  private enqueue(pass: Pass): Promise<void> {
     const generation = this.generation;
     const run = (this.current ?? Promise.resolve())
-      .then(() => this.run(generation, since))
+      .then(() => this.run(generation, pass))
       .catch((error) => this.d.log.warn(`checking Discord failed: ${(error as Error).message}`));
     const tracked: Promise<void> = run.finally(() => {
       if (this.current === tracked) this.current = null;
@@ -163,14 +208,17 @@ export class MessagePoller {
     while (this.current) await this.current;
   }
 
-  private async run(generation: number, since: ReadonlyMap<string, string> | undefined): Promise<void> {
+  private async run(generation: number, pass: Pass): Promise<void> {
     if (generation !== this.generation) return;
+    const { since, maxAgeMs } = pass;
+    const catchUp = maxAgeMs !== undefined;
+    const tally: Tally = { handedOn: 0, skipped: 0 };
     try {
-      const channels = await this.d.prepare();
+      const channels = catchUp ? [...(since?.keys() ?? [])] : await this.d.prepare();
       for (const channelId of channels) {
         if (generation !== this.generation) return;
         try {
-          await this.read(generation, channelId, since?.get(channelId));
+          await this.read(generation, channelId, since?.get(channelId), maxAgeMs, tally);
         } catch (error) {
           if (!(error instanceof RestError) || error.kind !== "client" || error.status === 401) throw error;
           // Any other refusal (no access to this channel, say) is logged by the REST client; the rest are still read.
@@ -179,18 +227,36 @@ export class MessagePoller {
       }
     } catch (error) {
       if (generation !== this.generation) return;
-      if (error instanceof RestError && error.status === 401) {
+      if (catchUp) {
+        // The gateway accepted the token, so a 401 here doesn't mark it as refused.
+        this.d.log.warn(`catching up stopped: ${(error as Error).message}`);
+      } else if (error instanceof RestError && error.status === 401) {
         this.d.log.warn("checking Discord stopped: the bot token was refused");
         this.stop();
         this.d.onRejected();
         return;
+      } else {
+        this.d.log.warn(`checking Discord stopped: ${(error as Error).message}`);
       }
-      this.d.log.warn(`checking Discord stopped: ${(error as Error).message}`);
+    }
+    if (maxAgeMs !== undefined && tally.handedOn + tally.skipped > 0) {
+      const age = plural(Math.round(maxAgeMs / 60_000), "minute");
+      const skipped = tally.skipped > 0 ? `, skipped ${tally.skipped} older than ${age}` : "";
+      this.d.log.info(`caught up on ${plural(tally.handedOn, "message")}${skipped}`);
     }
   }
 
-  /** Hand on a channel's messages after `from` (or its cursor), oldest first, a page at a time. */
-  private async read(generation: number, channelId: string, from: string | undefined): Promise<void> {
+  /**
+   * Hand on a channel's messages after `from` (or its cursor), oldest first, a page at a time. With `maxAgeMs`,
+   * a message older than that is skipped, but the cursor still moves past it. `tally` counts what was new.
+   */
+  private async read(
+    generation: number,
+    channelId: string,
+    from: string | undefined,
+    maxAgeMs: number | undefined,
+    tally: Tally,
+  ): Promise<void> {
     let after = from ?? this.d.cursors.get(channelId);
     if (after === undefined) {
       // The first look at this channel: start after its newest message, so nothing from before is handed on.
@@ -203,9 +269,18 @@ export class MessagePoller {
       const page = await this.d.rest.request<unknown>("GET", `/channels/${channelId}/messages?after=${after}&limit=${PAGE_SIZE}`);
       if (generation !== this.generation) return;
       const messages = messagesIn(page);
-      for (const message of messages) this.d.deliver({ ...message, channel_id: channelId });
+      const oldest = maxAgeMs === undefined ? null : this.d.clock.now() - maxAgeMs;
+      for (const message of messages) {
+        const fresh = oldest === null || idTime(message.id) >= oldest;
+        if (!this.d.handled(message.id)) tally[fresh ? "handedOn" : "skipped"]++;
+        if (fresh) this.d.deliver({ ...message, channel_id: channelId });
+      }
       const last = messages.at(-1);
-      if (last === undefined) return;
+      if (last === undefined) {
+        // Nothing new: the starting point becomes the cursor again, in case a new gateway session cleared it.
+        this.d.cursors.advance(channelId, after);
+        return;
+      }
       this.d.cursors.advance(channelId, last.id);
       if (!Array.isArray(page) || page.length < PAGE_SIZE) return;
       after = last.id;
