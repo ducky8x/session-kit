@@ -6,7 +6,7 @@
 # state file path, asks for the start skill on a new session, restates the
 # saved setup after a resume or a summary of the chat, and loads the user's
 # rules file. It also prunes old state files. At the end it passes its input
-# on to discord.sh and adds that hook's lines, if any.
+# on to workflow-ignore.sh and then discord.sh, and adds their lines, if any.
 #
 # Needs only bash and POSIX tools. It must never fail the session, so every
 # path exits 0.
@@ -104,13 +104,14 @@ describe_setup() {
   printf 'Workflow: %s · Autonomous: %s%s' "$w" "$a" "$c"
 }
 
-# print_discord <hook input>: run discord.sh session-start with the same
-# input, and add what it prints after a blank line.
-print_discord() {
-  local hook out
-  hook="$(dirname "$0")/discord.sh"
+# print_hook <hook input> <script> [arguments...]: run another session-kit
+# hook with the same input, and add what it prints after a blank line.
+print_hook() {
+  local input=$1 hook out
+  hook="$(dirname "$0")/$2"
+  shift 2
   [ -f "$hook" ] || return 0
-  out=$(printf '%s' "$1" | "${BASH:-bash}" "$hook" session-start 2>/dev/null)
+  out=$(printf '%s' "$input" | "${BASH:-bash}" "$hook" "$@" 2>/dev/null)
   [ -n "$out" ] || return 0
   printf '\n%s\n' "$out"
 }
@@ -169,7 +170,8 @@ main() {
   esac
 
   print_rules "$state_dir" "$sid"
-  print_discord "$raw"
+  print_hook "$raw" workflow-ignore.sh
+  print_hook "$raw" discord.sh session-start
 }
 
 main 2>/dev/null

@@ -146,6 +146,28 @@ cp -n skills/start/rules-template.md ~/.claude/session-kit/rules.md
 
 The file is yours. The plugin never overwrites it: the start skill copies the template only when no rules file exists.
 
+## Keeping workflow files out of git
+
+To keep files like `.agentcontext`, `CLAUDE.md` and `.task/` out of every repo, list them in `~/.claude/session-kit/ignore`. Nothing happens until that file exists.
+
+The file holds gitignore patterns, one per line. Blank lines and lines that start with `#` are skipped. For example:
+
+```gitignore
+# Files I never commit
+.agentcontext
+CLAUDE.md
+AGENTS.md
+.task/
+.notes/
+```
+
+At every session start, the session-start hook:
+
+1. Adds each listed pattern that's missing to git's global ignore file, so every repo ignores it, including repos you create later. That's the file named by `core.excludesFile` in your global git config. If that isn't set, it's `~/.config/git/ignore`, or `$XDG_CONFIG_HOME/git/ignore` if you set that variable. New lines go under a `# session-kit: workflow files` header. Your git config and the file's other lines stay as they are, and Claude is told which file changed.
+2. In a git repo, names the tracked files that match a pattern. It also names listed files and folders that exist but still aren't ignored, for example because the repo's `.gitignore` re-includes one with a `!` line. Tracked files are only flagged, never untracked for you. Claude can untrack them with `git rm --cached`, but git history still holds them.
+
+When everything is in order, it prints nothing. Removing a pattern from the list doesn't remove it from the global ignore file; edit that file yourself.
+
 ## Where state lives
 
 Each session's setup is saved in `~/.claude/session-kit/state/<session id>.json`: the workflow, whether autonomous mode is on and for what scope, the ids of its keep-awake command and heartbeat, and the Cloud answer with whether cloud subagents turned out to be available. That file lets the setup survive a summary of the chat. The session-start hook deletes state files older than 30 days.
@@ -153,6 +175,7 @@ Each session's setup is saved in `~/.claude/session-kit/state/<session id>.json`
 ## Requirements
 
 - bash and standard tools (`sed`, `awk`, `grep`, `find`, `tr`, `wc`). The hooks don't need python3 or jq. On Windows, the hooks need Git Bash.
+- git, for [keeping workflow files out of git](#keeping-workflow-files-out-of-git). Without it, that check does nothing.
 - Keep-awake in autonomous mode uses `caffeinate`, so it only works on macOS. On other systems autonomous mode runs without it and says so.
 
 ## Running the tests
@@ -161,7 +184,7 @@ Each session's setup is saved in `~/.claude/session-kit/state/<session id>.json`
 bash tests/test-hooks.sh
 ```
 
-The tests run each hook with a temporary `HOME`, so they never touch your real `~/.claude`. They use python3 to check the JSON that the subagent hook and the autonomous-mode guard print.
+The tests run each hook with a temporary `HOME`, so they never touch your real `~/.claude`. Git in the tests reads only that `HOME`'s config and skips the system config, so your git settings and global ignore file aren't touched either. The tests use python3 to check the JSON that the subagent hook and the autonomous-mode guard print, and git to set up test repos.
 
 ## If you already have your own versions
 
