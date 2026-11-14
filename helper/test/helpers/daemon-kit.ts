@@ -36,6 +36,8 @@ export interface DaemonKitOptions {
   /** Don't start the daemon yet. */
   noStart?: boolean;
   home?: string;
+  /** How old a message may be and still be handed on by the catch-up after a new gateway session. */
+  catchUpMaxAgeMs?: number;
 }
 
 /**
@@ -93,6 +95,7 @@ export async function daemonKit(o: DaemonKitOptions = {}) {
     pidAlive: o.pidAlive ?? (() => false),
     which: () => null,
     extensions: EXTENSIONS,
+    ...(o.catchUpMaxAgeMs === undefined ? {} : { catchUpMaxAgeMs: o.catchUpMaxAgeMs }),
   });
   cleanups.push(() => daemon.stop());
   if (!o.noStart) await daemon.start();

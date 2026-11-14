@@ -334,34 +334,11 @@ describe("between AC and battery power", () => {
     k.gateway.dispatch("MESSAGE_CREATE", { ...live, guild_id: GUILD_ID });
     await waitFor(() => k.seen.length === 1);
     await k.tick(1000);
-    expect(k.reads(channelId)).toHaveLength(before + 2);
+    // The retry, then the new gateway session's catch-up, which finds nothing new to hand on.
+    expect(k.reads(channelId)).toHaveLength(before + 3);
     expect(k.seen).toEqual([
       ["typed live", SID],
       ["typed between checks", SID],
-    ]);
-  });
-
-  test("a new gateway session forgets the cursors, so a message it missed isn't handed on later", async () => {
-    const k = await batteryKit({ power: "ac" });
-    await k.connected();
-    await k.startChat(SID);
-    const channelId = k.daemon.sessions.get(SID)!.channelId!;
-    const first = k.rest.addMessage({ channelId, content: "seen live" });
-    k.gateway.dispatch("MESSAGE_CREATE", { ...first, guild_id: GUILD_ID });
-    await waitFor(() => k.seen.length === 1);
-    // The connection ends in a way that can't be resumed; Discord gives the new one a new session.
-    k.gateway.closeLatest(4009);
-    await waitFor(() => k.daemon.gateway.state === "connecting");
-    k.rest.addMessage({ channelId, content: "typed while the gateway was away" });
-    await k.clock.advance(1000);
-    await waitFor(() => k.gateway.connections.length === 2 && k.daemon.gateway.state === "connected");
-    expect(k.daemon.cursors.get(channelId)).toBeUndefined();
-    await k.toBattery();
-    k.rest.addMessage({ channelId, content: "typed on battery" });
-    await k.tick();
-    expect(k.seen).toEqual([
-      ["seen live", SID],
-      ["typed on battery", SID],
     ]);
   });
 
