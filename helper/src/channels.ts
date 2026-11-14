@@ -3,7 +3,7 @@ import type { Clock, TimerHandle } from "./clock.ts";
 import { type Config, loadConfig, updateConfig } from "./config.ts";
 import { RestError, type RestClient, UNKNOWN_CHANNEL } from "./discord/rest.ts";
 import type { Logger } from "./log.ts";
-import { readTailLines } from "./names.ts";
+import { isUnnamed, readTailLines } from "./names.ts";
 import type { Paths } from "./paths.ts";
 import { INBOX_LIMIT, type SessionEntry, type SessionStore, type Surface, newSession } from "./state.ts";
 
@@ -48,11 +48,7 @@ export function slugify(text: string): string {
   return slug.slice(0, NAME_MAX).replace(/-+$/, "");
 }
 
-/** A session has no name yet when it has none, an empty one, or the desktop app's "New session". */
-export function isUnnamed(name: string | null | undefined): boolean {
-  const trimmed = name?.trim() ?? "";
-  return trimmed === "" || trimmed.toLowerCase() === "new session";
-}
+export { isUnnamed };
 
 export interface NameInput {
   sessionId: string;
