@@ -14,6 +14,7 @@ describe("pathsFor", () => {
     expect(p.bin).toBe("/home/someone/.claude/session-kit/bin/sk-discord");
     expect(p.updateLock).toBe("/home/someone/.claude/session-kit/bin/.sk-discord-update.lock");
     expect(p.updateState).toBe("/home/someone/.claude/session-kit/discord/update.json");
+    expect(p.desktopSessions).toBe("/home/someone/Library/Application Support/Claude/claude-code-sessions");
     expect(p.launchAgent).toBe("/home/someone/Library/LaunchAgents/io.github.ducky8x.session-kit.discord.plist");
   });
 });
