@@ -8,6 +8,7 @@
 - Discord posts wait while you're at the computer and go out once you've been away 5 minutes (`awayMinutes` in `config.json`); one made while you're there is dropped if you keep using the computer. Questions and permission prompts go out the first time you're away instead of after 2 minutes, replies to what you type in Discord still go out at once, and a check-in that comes due while you're there is skipped.
 - The Discord bot never @mentions you, so set the server to All Messages to be notified. `sk-discord send --ping` is still accepted but does nothing.
 - Renaming a session after it has ended, in the desktop app's sidebar or with `/rename` after resuming it somewhere else, now renames its Discord channel too, and a channel can be renamed twice in any 10 minutes instead of once every 5.
+- Sessions keep listening on Discord while the helper restarts, such as after an update: a session waits up to 3 minutes for the helper to come back before it tells you the helper is down.
 - The release build falls back to an Intel Mac runner when no Apple silicon runner is free.
 - Cloud agents: a startup question that sends worker tasks that don't need your computer to cloud subagents, once Claude Code offers them. Until then they run locally.
 

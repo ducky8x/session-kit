@@ -137,7 +137,7 @@ Each line from the listener is JSON with a `type`:
 - `disabled`: Discord was turned off. Stop listening and posting, don't start the listener again, and say so in one line at the keyboard.
 - `unlinked`: this session's channel is gone (deleted by hand, or removed after a month without messages). Don't start the listener again now. A later post creates a new channel; start the listener again after that post.
 - `replaced`: a newer listener for this session took over, for example one started after a summary of the chat or after `/clear`. Don't start the listener again; the newer one is already running.
-- `helper-down` (the listener exits with code 2): the helper isn't running. Start the listener once more. If it's down again, tell the user at the keyboard, with the fix `launchctl kickstart -k gui/$UID/io.github.ducky8x.session-kit.discord`, and start the listener again when they say it's back or `status` shows `connected`.
+- `helper-down` (the listener exits with code 2): the listener kept trying for 3 minutes and the helper stayed down, so it isn't just restarting. Start the listener once more. If it's down again, tell the user at the keyboard, with the fix `launchctl kickstart -k gui/$UID/io.github.ducky8x.session-kit.discord` (if that fails with a code-signing error, run it a second time), and start the listener again when they say it's back or `status` shows `connected`.
 
 ### Messages that arrive between listeners
 
