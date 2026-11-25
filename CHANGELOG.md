@@ -10,6 +10,7 @@
 - Renaming a session after it has ended, in the desktop app's sidebar or with `/rename` after resuming it somewhere else, now renames its Discord channel too, and a channel can be renamed twice in any 10 minutes instead of once every 5.
 - Sessions keep listening on Discord while the helper restarts, such as after an update: a session waits up to 3 minutes for the helper to come back before it tells you the helper is down.
 - What you type in a session's Discord channel while the helper restarts now reaches the session once the helper is back, instead of being lost. Messages more than 15 minutes old are skipped.
+- When you ask a session to ping you about something, such as "let me know when the tests pass", it now posts in its Discord channel when that happens, as well as telling you at the keyboard.
 - The release build falls back to an Intel Mac runner when no Apple silicon runner is free.
 - Cloud agents: a startup question that sends worker tasks that don't need your computer to cloud subagents, once Claude Code offers them. Until then they run locally.
 
