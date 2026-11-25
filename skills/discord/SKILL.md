@@ -106,6 +106,7 @@ When the session-start hook prints a `Discord:` line with a listener command, st
 Post with `~/.claude/session-kit/bin/sk-discord send --session <id> "<text>"`. For longer text or text with quotes, pass `-` and give the text on stdin with a heredoc.
 
 - Post when a task finishes, when something fails or you're stuck, and when a long run ends. Never post frequent progress updates.
+- When the user asks to be told about something ("ping me when it's ready", "notify me", "let me know when the tests pass"), post in this session's channel when it happens, and tell them at the keyboard too. That post answers their request, so it doesn't count as a progress update. Write the request down in a file the session keeps, such as its plan or notes file, so it survives a summary of the chat. The helper holds it while the user is at the computer, like any other post.
 - Add `--done` to the last post of a finished task. That stops the hourly check-ins.
 - The helper holds posts while the user is at the computer and sends them once they've been away 5 minutes. A post made while they're there is dropped once they use the computer again, since they can see the session themselves. `send` then prints a line starting `Held:` and exits 0. That isn't an error: don't post it again, and tell the user at the keyboard as usual.
 - If the user wrote in this session's channel in the last 30 minutes, they're talking to you there, and posts go out at once.
